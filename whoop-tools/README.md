@@ -5,9 +5,13 @@ signals; everything lives in `whoop.db` on your Mac.
 
 **Two data sources → one SQLite DB → localhost dashboard**
 
-1. **Strap over BLE** (reverse-engineered WHOOP 4.0 protocol) — live HR + RR (HRV),
-   and a lossless capture of the historical drain. The laptop is the strap's host:
-   `daemon.py` connects whenever the strap is nearby. Files: `whoop.py`, `daemon.py`.
+1. **Strap over BLE** (WHOOP 4.0). The hardware boundary is `device/`: public frame
+   format, GATT ids, and the connect handshake. `whoop.py` is the session client
+   the daemon holds; `daemon.py` connects whenever the strap is nearby, drains what
+   the strap stored, and streams live HR. The bytes after the accelerometer in a
+   stored record (temperature, optical, steps) still follow the imported OpenVitals
+   layout, which does not match the NOOP field names. That layout was not re-checked
+   on a strap here.
 2. **Official WHOOP API v2 (OAuth)** — Recovery, HRV, resting HR, SpO₂, skin temp,
    Sleep stages, Strain, workouts, as an archive. File: `whoop_api.py`.
 

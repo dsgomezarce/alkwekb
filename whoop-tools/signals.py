@@ -10,6 +10,8 @@ What is known about the raw value (record version 24, offset 69; see whoop.parse
   - on the one night we have both raw records and WHOOP's own reading (the end of the night of
     11-12 June 2025), the raw mean was 342.8 and WHOOP said 33.9 C. So ~0.1 C per count fits,
     but one partial night cannot fix the scale or the offset: it is NOT calibrated.
+    The byte this reads (record offset 69) is also not where the public NOOP schema
+    puts skin temperature. Treat the nightly change as the imported hypothesis.
 So the number this keeps is the change against your own usual night, in raw counts, with an
 approximate C (counts / 10) that is labelled as approximate wherever it is shown.
 

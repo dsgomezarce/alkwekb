@@ -1,3 +1,16 @@
+# Vitals DS
+
+Motor local para una correa WHOOP. La tubería de señales, sesiones y procesamiento
+viene de [OpenVitals](https://github.com/tohmsc/openvitals-public) en `38576c3`.
+La frontera de hardware está en `whoop-tools/device/`: trama, UUIDs GATT y el
+handshake de conexión salen de las notas públicas de NOOP y OpenStrap, más el
+Heart Rate Measurement del Bluetooth SIG (`0x2A37`). Lo que esas notas no cierran
+(unidad RR del flujo propio de la correa, temperatura / óptica / pasos, alarma)
+sigue en el código importado y queda marcado como no verificado en este fork.
+WHOOP 5.0 / MG usa otro servicio y no se habla.
+
+---
+
 # OpenVitals — own your wearable data
 
 A local-first system to pull your own biometrics off your wearable. It currently supports the
@@ -183,7 +196,7 @@ are in `skills/reverse-engineer-whoop/resources/`.
 
 ## Architecture
 ```
- WHOOP 4.0 strap ──BLE──►  whoop.py / daemon.py ───────────────┐
+ WHOOP 4.0 strap ──BLE──►  device/  →  whoop.py / daemon.py ──┐
  WHOOP API (OAuth) ──────►  whoop_api.py ─────────────────────┤──►  SQLite (whoop.db)
                                                               │        │
                                       decode.py (raw→tables) ─┘        ├─► dashboard.py (localhost)

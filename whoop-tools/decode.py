@@ -5,7 +5,10 @@
   - device_logs : reassembled firmware console text (0x32), one row per log line
 The event-framed records (0x30 #3/#63) go to strap_samples as they are: one pair every
 ~9 minutes, 10 and 14 int16s, a status record (not raw optical data); labels not verified.
-The stored 1 Hz history records (0x2F, version 24) are folded into ble_hr, so the seconds
+The stored 1 Hz history records (0x2F, version 24) are folded into ble_hr. Temperature,
+optical levels and steps use the OpenVitals field map in whoop.parse_historical, which
+disagrees with the NOOP schema; see that docstring. Heart rate and the accelerometer
+triplet sit on offsets both maps share. The seconds
 the laptop was not connected get backfilled once the strap comes back in range, and into
 motion_min, strap_min (seconds worn, skin temperature, steps, optical levels) and offwrist.
 Version 25 records (a 40 s burst of one 24 Hz optical channel every ~20 minutes) stay raw.

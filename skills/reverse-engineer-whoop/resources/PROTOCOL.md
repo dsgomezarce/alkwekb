@@ -1,7 +1,18 @@
 # WHOOP 4.0 BLE protocol reference (verified)
 
+> **Vitals DS.** This note is imported from OpenVitals. The engine's hardware
+> boundary is `whoop-tools/device/`. That module follows the public NOOP and
+> OpenStrap write-ups for the frame, the safe commands, and the connect
+> handshake (8-byte `SET_CLOCK`, `EXIT_HIGH_FREQ_SYNC`, no destructive
+> opcodes). It does not repeat the strap captures described below. Where this
+> note and `device/protocol.py` disagree — clock length, entering high-freq
+> sync, characteristic `…0007`, and the names of the bytes after the
+> accelerometer — the device module is what the session sends, and the
+> disagreement is left unverified.
+
 Verified against real captured frames from a WHOOP 4.0 (firmware Harvard 41.17.x /
-Boylston 17.2.x). 5.0/MG differ where noted. Not official; use at your own risk.
+Boylston 17.2.x) by the OpenVitals author, not by this fork. 5.0/MG differ where
+noted. Not official; use at your own risk.
 
 ## GATT
 - Custom service **`61080001-8d6d-82b8-614a-1c8cb0f8dcc6`** (GEN_4 / 4.0). 5.0/MG = `fd4b0001-…`.
@@ -62,8 +73,14 @@ def frame(ptype, seq, cmd, data=b""):
 - Drain batch ACK (0x17): data = `struct.pack("<BII", 1, trim, 0)` (echo the `trim` from
   the METADATA HISTORY_END frame, else the strap replays the batch)
 - Enter HighFreqSync: `aa07006b230060f340f888`
-- Init sequence that works: subscribe 0003/0004/0005/0007 (+2A37) → HelloHarvard →
-  SetClock(now) → GetName → EnterHighFreqSync.
+- OpenVitals' init, on the strap they used: subscribe 0003/0004/0005/0007 (+2A37) →
+  HelloHarvard → SetClock(now) → GetName → EnterHighFreqSync. The clock body they
+  sent was 9 bytes, and they note it was not shown to be what fixed a reset clock.
+- Vitals DS does not send that init. `device.protocol.connect_handshake` sends
+  hello, name, an 8-byte clock, get-clock, stop the raw flood, get-data-range,
+  exit high-freq sync, then enable the standard HR profile. `…0007` is subscribed
+  only when the GATT table has it. This sequence is from the public notes and has
+  not been run on a strap here.
 
 ## Notification parsing
 - **REALTIME_DATA (0x28):** `ts u32 LE @2`, `hr @8`, `rr_count @9`, up to 4×`u16 RR @10`

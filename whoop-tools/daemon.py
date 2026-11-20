@@ -204,6 +204,25 @@ class Daemon:
         except Exception as ex:        # never let a DB hiccup kill the BLE callback
             log("live write error:", ex)
 
+    def on_standard_hr(self, sample):
+        """Bluetooth Heart Rate Measurement (0x2A37). RR is already milliseconds.
+
+        Stored beside the custom stream, not into ble_hr: the custom frames are
+        what decode and the HRV math already consume, and their RR unit is the
+        upstream millisecond reading. This marker is the SIG path, which is
+        grounded, and it stays empty until a strap actually notifies.
+        """
+        try:
+            db.set_state(self.c, "std_hr_now", json.dumps({
+                "hr": sample["hr"],
+                "rr_ms": [round(x, 1) for x in sample["rr_ms"]],
+                "contact": sample["contact"],
+                "ts": time.time(),
+                "src": "ble-2a37",
+            }))
+        except Exception as ex:
+            log("standard hr write error:", ex)
+
     def on_battery(self, pct, key="battery_now"):
         """The strap's answer to GetBatteryLevel: the one strap battery reading that is current.
         With key="pack_battery_now": the Battery Level characteristic (likely the battery pack)."""
@@ -343,6 +362,7 @@ class Daemon:
             w.on_realtime = self.on_realtime
             w.on_battery = self.on_battery
             w.on_event = self.on_event
+            w.on_standard_hr = self.on_standard_hr
             self.offset = None
             self.last_rt = time.monotonic()
             next_drain = 0.0

@@ -1,30 +1,37 @@
 #!/usr/bin/env python3
 """
-whoop.py — a from-scratch WHOOP 4.0 client (BLE), independent of the WHOOP app.
+whoop.py — WHOOP 4.0 session client used by the daemon and the collector.
 
-Protocol (CRC-verified against real captures):
-  Frame: AA | LEN(u16 LE = len(inner)+4) | CRC8(LEN) | inner | CRC32(inner, LE)
-  inner = [type u8][seq u8][cmd u8][data...]   (0x28 realtime packs ts in place of cmd)
-  CRC8  = CRC-8/SMBUS (poly 0x07, init 0, xorout 0)   over the 2 length bytes
-  CRC32 = CRC-32/ISO-HDLC (binascii.crc32)             over inner
+The frame codec, GATT ids, and connect handshake live in ``device/`` (the
+hardware boundary). That module follows the public NOOP / OpenStrap notes:
+8-byte SET_CLOCK, exit high-freq sync rather than enter, and it refuses the
+destructive opcodes. This file still parses the imported OpenVitals history
+layout for the processing pipeline. Fields those notes disagree on are called
+out on ``parse_historical`` and are not re-checked without a strap.
 
-Packet types: 0x23 COMMAND 0x24 CMD_RESP 0x28 REALTIME 0x2F HISTORICAL
-              0x30 EVENT 0x31 METADATA 0x32 CONSOLE
 CLI:  whoop.py info | live | drain
       whoop.py buzz [pattern] [loops]            vibrate now
       whoop.py alarm 07:00 [once] | off | show   silent alarm (stored on the strap)
 """
-import asyncio, struct, binascii, sys, time, csv, json, os, datetime as dt
+import asyncio, struct, sys, time, csv, json, os, datetime as dt
 from bleak import BleakClient, BleakScanner
 
-WHOOP_SVC = "61080001-8d6d-82b8-614a-1c8cb0f8dcc6"
+from device.protocol import (
+    BATTERY_LEVEL, CMD_CHAR as _CMD, DESTRUCTIVE, HR_MEASUREMENT, NOTIFY_CHARS,
+    OPTIONAL_NOTIFY, WHOOP4_SERVICE, build, connect_handshake, crc8,
+    parse_heart_rate_measurement, set_clock_payload, unframe,
+)
+
+WHOOP_SVC = WHOOP4_SERVICE
 BASE = "6108{:04x}-8d6d-82b8-614a-1c8cb0f8dcc6"
-CMD_CHAR = BASE.format(2)
-CH_RESP, CH_EVENT, CH_DATA, CH_7 = (BASE.format(n) for n in (3, 4, 5, 7))
-HR_CHAR = "00002a37-0000-1000-8000-00805f9b34fb"
-# Standard Battery Level. It does not match the strap's own gauge (56% while GetBatteryLevel
-# said 100.0% on the charger), so it is most likely the slide-on battery pack. Not yet proven.
-PACK_CHAR = "00002a19-0000-1000-8000-00805f9b34fb"
+CMD_CHAR = _CMD
+CH_RESP, CH_EVENT, CH_DATA = NOTIFY_CHARS
+CH_7 = OPTIONAL_NOTIFY
+HR_CHAR = HR_MEASUREMENT
+# Standard Battery Level. OpenVitals saw a different number here than GetBatteryLevel
+# and guessed the slide-on pack. That guess is not proven. NOOP reads the same
+# characteristic as a single battery percent and does not assign it to the pack.
+PACK_CHAR = BATTERY_LEVEL
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Hard limits on every Bluetooth call. Bleak waits on CoreBluetooth callbacks with no
@@ -56,60 +63,20 @@ EVENT_NAMES = {E_ALARM_SET: "alarm set", E_ALARM_FIRED: "alarm fired (strap)",
                E_HAPTICS_FIRED: "haptics fired", E_HAPTICS_ENDED: "haptics ended"}
 
 
-def crc8(d: bytes) -> int:
-    c = 0
-    for b in d:
-        c ^= b
-        for _ in range(8):
-            c = ((c << 1) ^ 0x07) & 0xFF if c & 0x80 else (c << 1) & 0xFF
-    return c
-
-
-def build(ptype: int, seq: int, cmd: int, data: bytes = b"") -> bytes:
-    inner = bytes([ptype, seq, cmd]) + data
-    ln = struct.pack("<H", len(inner) + 4)
-    return b"\xAA" + ln + bytes([crc8(ln)]) + inner + struct.pack("<I", binascii.crc32(inner) & 0xFFFFFFFF)
-
-
 def cmd(opcode: int, data: bytes = b"", seq: int = 0) -> bytes:
+    if opcode in DESTRUCTIVE:
+        raise ValueError(f"opcode {opcode} is on NOOP's do-not-send list")
     return build(T_COMMAND, seq, opcode, data)
 
 
-def unframe(buf: bytes):
-    """Split a byte buffer into inner payloads; returns (inners, leftover).
-
-    Resyncs on the next 0xAA whose header CRC8 checks out, so one stray or
-    corrupt byte can't stall the channel, and drops frames whose CRC32 fails.
-    """
-    out = []
-    while True:
-        i = buf.find(b"\xAA")
-        if i < 0:
-            return out, b""
-        buf = buf[i:]
-        if len(buf) < 4:
-            break
-        ln = struct.unpack_from("<H", buf, 1)[0]      # len(inner) + 4 (crc32)
-        if ln < 5 or crc8(buf[1:3]) != buf[3]:        # not a real header
-            buf = buf[1:]
-            continue
-        flen = 4 + ln                                 # AA + len(2) + crc8 + inner + crc32
-        if len(buf) < flen:
-            break
-        inner = buf[4:flen - 4]
-        if struct.unpack_from("<I", buf, flen - 4)[0] != binascii.crc32(inner) & 0xFFFFFFFF:
-            print(f"  (dropped frame with bad CRC32, {flen} bytes)")
-            buf = buf[1:]
-            continue
-        out.append(inner)
-        buf = buf[flen:]
-    return out, buf
-
-
 def parse_realtime(inner: bytes):
-    # inner = [0x28][ver][ts u32 LE @2][subsec u16 @6][hr @8][rrN @9][4×u16 RR in ms @10..18]
-    # RR is whole milliseconds, not 1/1024 s like the standard Heart Rate service (0x2A37):
-    # at rest 60000 / mean(RR) matches the strap's own HR to 0.3% (1/1024 s would be 2.4% off).
+    # inner = [0x28][ver][ts u32 LE @2][subsec u16 @6][hr @8][rrN @9][4×u16 RR @10..18]
+    # Offsets match NOOP's REALTIME_DATA schema and this file's older parser.
+    # OpenVitals reads the custom RR counts as whole milliseconds (60000/mean
+    # matched the strap's HR on their capture). NOOP does not publish that unit.
+    # The standard 0x2A37 path (device.parse_heart_rate_measurement) is 1/1024 s.
+    # This fork has not repeated the millisecond check. The key stays rr_ms so
+    # the pipeline that already assumes milliseconds keeps working.
     if len(inner) < 10:
         return None
     ts = struct.unpack_from("<I", inner, 2)[0]
@@ -138,6 +105,14 @@ def parse_historical(inner: bytes):
          flat when still; it resets now and then (the WHOOP app reset it at sync)
     Not fields: d48 (the top byte of a float at d45, NOT skin contact), d73-76 (constant).
     Other versions only get seq/ts; their layout differs (25 = a 24 Hz optical burst).
+
+    Vitals DS: HR, unix time, RR counts and the float triplet at data offset 33
+    sit on the same offsets as NOOP's version-24 schema. Skin temperature,
+    the two optical words, the step counter and "not skin contact" do not —
+    NOOP names other quantities on those bytes (and puts skin temp at frame
+    offset 72, which is this layout's second optical word). Those fields stay
+    so sleep, steps and the nightly temperature hypothesis keep running.
+    They are the imported layout, not a measurement this fork repeated.
     """
     d = inner[3:]
     if len(d) < 24:
@@ -249,6 +224,7 @@ class Whoop:
         self.verbose = True           # print every response/event (the daemon turns this off)
         self._hist_done = asyncio.Event()
         self.on_event = None          # optional: called with (event id, inner) for every EVENT
+        self.on_standard_hr = None    # optional: Bluetooth 0x2A37 sample (RR already in ms)
         self._waiting = {}            # opcode -> Future for that command's next response
 
     async def __aenter__(self):
@@ -261,8 +237,32 @@ class Whoop:
 
     async def _connect(self):
         await self.client.connect()
-        for ch in (CH_RESP, CH_EVENT, CH_DATA, CH_7):
+        for ch in (CH_RESP, CH_EVENT, CH_DATA):
             await self.client.start_notify(ch, self._mk(ch))
+        present = set()
+        services = getattr(self.client, "services", None)
+        if services:
+            for service in services:
+                for char in service.characteristics:
+                    present.add(str(char.uuid).lower())
+        # …0007 is a 5.0 characteristic in NOOP. Subscribe only when this strap has it
+        # (or when the table could not be read — then a missing char is ignored).
+        if not present or CH_7.lower() in present:
+            try:
+                await self.client.start_notify(CH_7, self._mk(CH_7))
+            except Exception:
+                if self.verbose:
+                    print("  (no …0007 notify)")
+        try:
+            await self.client.start_notify(HR_CHAR, self._on_std_hr)
+        except Exception:
+            if self.verbose:
+                print("  (standard heart-rate notify unavailable)")
+
+    def _on_std_hr(self, _, data):
+        sample = parse_heart_rate_measurement(bytes(data))
+        if sample and self.on_standard_hr:
+            self.on_standard_hr(sample)
 
     async def __aexit__(self, *a):
         try:
@@ -316,6 +316,11 @@ class Whoop:
                 print(f"  [event #{inner[2]}{' ' + name if name else ''}] {inner[3:].hex(' ')}")
 
     async def send(self, frame):
+        inners, _ = unframe(frame)
+        for inner in inners:
+            if len(inner) >= 3 and inner[0] == T_COMMAND and inner[2] in DESTRUCTIVE:
+                raise RuntimeError(
+                    f"refusing opcode 0x{inner[2]:02x}: NOOP lists it as destructive; this engine does not send it")
         await asyncio.wait_for(self.client.write_gatt_char(CMD_CHAR, frame, response=False),
                                WRITE_TIMEOUT)
 
@@ -371,14 +376,17 @@ class Whoop:
         await self.send(cmd(C_HIST_ACK, b"\x01" + body))
 
     async def init(self):
-        await self.send(cmd(C_HELLO_HARVARD, b"\x00"))
-        await self.set_time()
-        await self.send(cmd(C_GET_NAME, b"\x00"))
-        await self.send(cmd(C_HIGHFREQ_ON))
+        """Public connect handshake (device.protocol.connect_handshake).
+
+        Replaces the imported sequence (9-byte clock, then EnterHighFreqSync).
+        NOOP and OpenStrap both use an 8-byte clock; NOOP exits high-freq sync
+        instead of entering it. Not re-run on a strap in this fork.
+        """
+        for frame in connect_handshake(time.time()):
+            await self.send(frame)
 
     async def set_time(self):
-        now = int(time.time())
-        await self.send(cmd(C_SET_CLOCK, struct.pack("<I", now) + b"\x00" * 5))
+        await self.send(cmd(C_SET_CLOCK, set_clock_payload(time.time())))
 
     async def battery(self):
         await self.send(cmd(C_BATTERY, b"\x00"))
