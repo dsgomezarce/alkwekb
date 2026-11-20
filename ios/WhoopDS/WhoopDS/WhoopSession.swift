@@ -75,7 +75,7 @@ final class WhoopSession: NSObject, ObservableObject {
     private var loggedKinds = Set<String>()
 
     private enum Phase { case idle, handshake, waitRange, offload, finished }
-    private enum Outbound { case hello, name, flag(Int), range, historical, ack }
+    private enum Outbound: Equatable { case hello, name, flag(Int), range, historical, ack }
 
     private var privateNotifies: [CBUUID] { [fd4b(3), fd4b(4), fd4b(5), fd4b(7)] }
 
