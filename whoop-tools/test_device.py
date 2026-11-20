@@ -249,8 +249,99 @@ class MgLive(unittest.TestCase):
         self.assertEqual(link.writes, [])
 
 
+class MgListen(unittest.TestCase):
+    """Subscribe-only MG listen. No radio, no write, no history ack."""
+
+    def test_prints_each_notification_as_uuid_and_hex(self):
+        from device.protocol import HR_MEASUREMENT
+        packets = {
+            mg.FD4B_NOTIFY[0]: [b"\xaa\x01"],
+            mg.FD4B_NOTIFY[1]: [b"\x10\x3d"],
+            mg.FD4B_NOTIFY[2]: [bytes.fromhex("deadbeef")],
+            mg.FD4B_NOTIFY[3]: [b""],
+            HR_MEASUREMENT: [b"\x00\x3c"],
+        }
+        link = _NotifyLink(packets)
+        lines = []
+
+        async def pause(seconds):
+            self.assertEqual(seconds, 20)
+
+        result = __import__("asyncio").run(
+            mg.read_only_listen(link, sleep=pause, emit=lines.append))
+        self.assertEqual(link.writes, [])
+        self.assertEqual(link.reads, [])
+        self.assertEqual(link.notifies, list(mg.LISTEN_UUIDS))
+        self.assertNotIn(mg.FD4B_COMMAND, link.notifies)
+        self.assertEqual(len(result["notes"]), 5)
+        self.assertIn(f"{mg.FD4B_NOTIFY[0]} aa01", lines)
+        self.assertIn(f"{mg.FD4B_NOTIFY[2]} deadbeef", lines)
+        self.assertIn(f"{HR_MEASUREMENT} 003c", lines)
+        self.assertTrue(any("No write to fd4b0002" in line for line in lines))
+        self.assertEqual(link.stopped, list(mg.LISTEN_UUIDS))
+
+    def test_a_refused_subscribe_does_not_stop_the_others(self):
+        from device.protocol import HR_MEASUREMENT
+        link = _NotifyLink(
+            {HR_MEASUREMENT: [b"\x00\x3c"]},
+            fail={mg.FD4B_NOTIFY[0]},
+        )
+        lines = []
+        result = __import__("asyncio").run(
+            mg.read_only_listen(link, sleep=_instant, emit=lines.append))
+        self.assertNotIn(mg.FD4B_NOTIFY[0], result["subscribed"])
+        self.assertIn(HR_MEASUREMENT, result["subscribed"])
+        self.assertEqual(result["notes"], [(HR_MEASUREMENT, b"\x00\x3c")])
+        self.assertTrue(any("subscribe failed" in line for line in lines))
+        self.assertEqual(link.writes, [])
+
+    def test_quiet_listen_prints_no_invented_hex(self):
+        link = _NotifyLink({})
+        lines = []
+        result = __import__("asyncio").run(
+            mg.read_only_listen(link, sleep=_instant, emit=lines.append))
+        self.assertEqual(result["notes"], [])
+        self.assertTrue(any(line == "No notifications in this window." for line in lines))
+        printed = [line for line in lines if line.startswith("fd4b") or line.startswith("00002a37")]
+        self.assertEqual(printed, [])
+        self.assertEqual(link.writes, [])
+
+    def test_command_channel_is_not_in_the_listen_set(self):
+        self.assertNotIn(mg.FD4B_COMMAND, mg.LISTEN_UUIDS)
+        with self.assertRaises(RuntimeError):
+            mg._refuse_command(mg.FD4B_COMMAND)
+
+
 async def _instant(_seconds):
     return None
+
+
+class _NotifyLink:
+    def __init__(self, packets, fail=()):
+        self.packets = packets
+        self.fail = set(fail)
+        self.notifies = []
+        self.stopped = []
+        self.reads = []
+        self.writes = []
+
+    async def read(self, uuid):
+        self.reads.append(uuid)
+        raise AssertionError("listen must not read")
+
+    async def start_notify(self, uuid, callback):
+        if uuid in self.fail:
+            raise OSError("insufficient authentication")
+        self.notifies.append(uuid)
+        for note in self.packets.get(uuid, []):
+            callback(note)
+
+    async def stop_notify(self, uuid):
+        self.stopped.append(uuid)
+
+    async def write(self, uuid, data):
+        self.writes.append((uuid, bytes(data)))
+        raise AssertionError("listen must not write")
 
 
 class _Link:

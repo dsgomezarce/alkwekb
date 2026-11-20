@@ -17,7 +17,7 @@ import asyncio, struct, sys, time, csv, json, os, datetime as dt
 from bleak import BleakClient, BleakScanner
 
 from device.discover import command_address, rank
-from device.mg_live import LIVE_SECONDS, read_only_live
+from device.mg_live import LISTEN_SECONDS, LIVE_SECONDS, read_only_listen, read_only_live
 from device.protocol import (
     BATTERY_LEVEL, CMD_CHAR as _CMD, DESTRUCTIVE, HR_MEASUREMENT, NOTIFY_CHARS,
     OPTIONAL_NOTIFY, WHOOP4_SERVICE, build, connect_handshake, crc8,
@@ -530,10 +530,18 @@ async def run_mg_live(address, seconds=LIVE_SECONDS):
         return await read_only_live(_BleakReadOnly(client), seconds=seconds, emit=print)
 
 
+async def run_mg_listen(address, seconds=LISTEN_SECONDS):
+    """Subscribe to the fd4b notify characteristics and 2A37. No writes."""
+    print("WHOOP 5.0/MG read-only listen.")
+    async with BleakClient(address, timeout=20.0) as client:
+        return await read_only_listen(_BleakReadOnly(client), seconds=seconds, emit=print)
+
+
 async def _mg_command(addr, mode):
-    """MG entry. live is the read-only HR window. info lists GATT. drain is refused."""
+    """MG entry. live reads standard GATT. listen only subscribes. drain is refused."""
     if mode == "drain":
-        print("Refusing drain on a WHOOP 5.0/MG. fd4b0002 is not written.")
+        print("Refusing drain on a WHOOP 5.0/MG.")
+        print("Stored history stays on the strap. fd4b0002 is not written.")
         return
     if mode == "live":
         try:
@@ -541,6 +549,13 @@ async def _mg_command(addr, mode):
         except Exception as ex:
             print(f"read-only live failed: {ex}")
             print("Stopped. The 4.0 handshake was not sent.")
+        return
+    if mode == "listen":
+        try:
+            await asyncio.wait_for(run_mg_listen(addr), CONNECT_TIMEOUT + LISTEN_SECONDS)
+        except Exception as ex:
+            print(f"read-only listen failed: {ex}")
+            print("Stopped. fd4b0002 was not written.")
         return
     try:
         await asyncio.wait_for(read_only_gatt(addr), CONNECT_TIMEOUT)
@@ -577,13 +592,20 @@ async def cli():
             print(f"read-only connect failed: {ex}")
             return
         if kind == "mg":
-            if mode == "live":
-                await _mg_command(addr, "live")
+            if mode in ("live", "listen", "drain"):
+                await _mg_command(addr, mode)
             return
         if kind != "4.0":
             return
+        if mode == "listen":
+            print("listen is only for an fd4b strap. No 4.0 handshake is sent.")
+            return
         if mode != "info":
             print("GATT shows a WHOOP 4.0. Continuing with that command set.")
+
+    if mode == "listen":
+        print("listen is only for an fd4b strap. No 4.0 handshake is sent.")
+        return
 
     if mode not in ("info", "live", "drain"):
         print(f"Unknown mode {mode!r}.")
