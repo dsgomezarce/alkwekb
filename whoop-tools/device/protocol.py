@@ -219,13 +219,14 @@ def parse_heart_rate_measurement(data: bytes):
     contact = bool(flags & 0x04) if flags & 0x02 else None
     if flags & 0x08:                 # energy expended, not used
         i += 2
-    rr_ms = []
+    rr_raw, rr_ms = [], []
     if flags & 0x10:
         while i + 1 < len(data):
             raw = int.from_bytes(data[i:i + 2], "little")
+            rr_raw.append(raw)
             rr_ms.append(raw * 1000 / 1024)
             i += 2
-    return {"hr": hr, "rr_ms": rr_ms, "contact": contact, "unit": "1/1024s"}
+    return {"hr": hr, "rr_raw": rr_raw, "rr_ms": rr_ms, "contact": contact, "unit": "1/1024s"}
 
 
 def parse_agreed_realtime(inner: bytes):

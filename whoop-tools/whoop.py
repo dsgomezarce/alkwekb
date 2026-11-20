@@ -17,6 +17,7 @@ import asyncio, struct, sys, time, csv, json, os, datetime as dt
 from bleak import BleakClient, BleakScanner
 
 from device.discover import command_address, rank
+from device.mg_live import LIVE_SECONDS, read_only_live
 from device.protocol import (
     BATTERY_LEVEL, CMD_CHAR as _CMD, DESTRUCTIVE, HR_MEASUREMENT, NOTIFY_CHARS,
     OPTIONAL_NOTIFY, WHOOP4_SERVICE, build, connect_handshake, crc8,
@@ -462,7 +463,7 @@ def _show_choice(ranked):
     family = chosen.get("family")
     if family == "mg":
         print("Nearest strap advertises fd4b0001 (WHOOP 5.0/MG).")
-        print("The 4.0 handshake is not sent. Connecting read-only to list GATT.")
+        print("The 4.0 handshake is not sent, and fd4b0002 is not written.")
     elif family == "4.0":
         print("Nearest strap advertises 61080001 (WHOOP 4.0).")
     else:
@@ -502,6 +503,52 @@ async def read_only_gatt(address):
         return kind
 
 
+class _BleakReadOnly:
+    """Reads and notifies. Has no write method, so the MG live path cannot send one."""
+
+    def __init__(self, client):
+        self.client = client
+
+    async def read(self, uuid):
+        return bytes(await self.client.read_gatt_char(uuid))
+
+    async def start_notify(self, uuid, callback):
+        def handler(_sender, data):
+            callback(bytes(data))
+        await self.client.start_notify(uuid, handler)
+
+    async def stop_notify(self, uuid):
+        await self.client.stop_notify(uuid)
+
+
+async def run_mg_live(address, seconds=LIVE_SECONDS):
+    """Device-info, battery, and ~15s of standard HR. No vendor writes."""
+    print("WHOOP 5.0/MG read-only live.")
+    print("Reading device info and battery, then 2A37. fd4b0002 is not written.")
+    print("No 4.0 handshake, drain, buzz, or alarm.")
+    async with BleakClient(address, timeout=20.0) as client:
+        return await read_only_live(_BleakReadOnly(client), seconds=seconds, emit=print)
+
+
+async def _mg_command(addr, mode):
+    """MG entry. live is the read-only HR window. info lists GATT. drain is refused."""
+    if mode == "drain":
+        print("Refusing drain on a WHOOP 5.0/MG. fd4b0002 is not written.")
+        return
+    if mode == "live":
+        try:
+            await asyncio.wait_for(run_mg_live(addr), CONNECT_TIMEOUT + LIVE_SECONDS)
+        except Exception as ex:
+            print(f"read-only live failed: {ex}")
+            print("Stopped. The 4.0 handshake was not sent.")
+        return
+    try:
+        await asyncio.wait_for(read_only_gatt(addr), CONNECT_TIMEOUT)
+    except Exception as ex:
+        print(f"read-only connect failed: {ex}")
+        print("Stopped. The 4.0 handshake was not sent.")
+
+
 async def cli():
     mode = sys.argv[1] if len(sys.argv) > 1 else "info"
     if len(sys.argv) > 2:
@@ -520,11 +567,7 @@ async def cli():
         family = chosen.get("family")
 
     if family == "mg":
-        try:
-            await asyncio.wait_for(read_only_gatt(addr), CONNECT_TIMEOUT)
-        except Exception as ex:
-            print(f"read-only connect failed: {ex}")
-            print("Stopped. The 4.0 handshake was not sent.")
+        await _mg_command(addr, mode)
         return
 
     if family is None:
@@ -532,6 +575,10 @@ async def cli():
             kind = await asyncio.wait_for(read_only_gatt(addr), CONNECT_TIMEOUT)
         except Exception as ex:
             print(f"read-only connect failed: {ex}")
+            return
+        if kind == "mg":
+            if mode == "live":
+                await _mg_command(addr, "live")
             return
         if kind != "4.0":
             return

@@ -8,6 +8,7 @@ import struct
 import unittest
 
 import device.discover as discover
+import device.mg_live as mg
 import device.protocol as proto
 import whoop
 
@@ -201,6 +202,88 @@ class Discovery(unittest.TestCase):
         mute = dict(self.DS, rssi=None)
         chosen = discover.choose([mute, self.GOAT])
         self.assertEqual(chosen["name"], "WHOOP GOAT")
+
+
+class MgLive(unittest.TestCase):
+    """Read-only MG live path. No radio, and no write to fd4b0002."""
+
+    def test_reads_info_and_prints_hr_in_sig_units(self):
+        link = _Link()
+        lines = []
+
+        async def pause(_seconds):
+            self.assertEqual(_seconds, 15)
+            return None
+
+        result = __import__("asyncio").run(
+            mg.read_only_live(link, sleep=pause, emit=lines.append))
+        self.assertEqual(link.writes, [])
+        touched = link.reads + link.notifies
+        self.assertNotIn(mg.FD4B_COMMAND, touched)
+        self.assertTrue(all(not u.lower().startswith("fd4b") for u in touched))
+        self.assertEqual(result["info"]["manufacturer"], "WHOOP")
+        self.assertEqual(result["info"]["firmware"], "5.0.1")
+        self.assertEqual(result["battery"], 80)
+        self.assertEqual(result["samples"][0]["hr"], 61)
+        self.assertEqual(result["samples"][0]["rr_raw"], [1024])
+        self.assertEqual(result["samples"][0]["unit"], "1/1024s")
+        self.assertIn("Manufacturer: WHOOP", lines)
+        self.assertIn("Battery: 80%", lines)
+        self.assertIn("HR  61 bpm  RR 1024 x 1/1024 s", lines)
+        self.assertLess(lines.index("Battery: 80%"), lines.index("HR  61 bpm  RR 1024 x 1/1024 s"))
+
+    def test_hr_without_rr_omits_the_interval(self):
+        self.assertEqual(mg.format_hr({"hr": 55, "rr_raw": []}), "HR  55 bpm")
+
+    def test_vendor_channel_is_refused(self):
+        with self.assertRaises(RuntimeError):
+            mg._forbid(mg.FD4B_COMMAND)
+
+    def test_quiet_window_does_not_invent_a_sample(self):
+        link = _Link(notes=[])
+        lines = []
+        result = __import__("asyncio").run(
+            mg.read_only_live(link, sleep=_instant, emit=lines.append))
+        self.assertEqual(result["samples"], [])
+        self.assertTrue(any("No heart-rate" in line for line in lines))
+        self.assertEqual(link.writes, [])
+
+
+async def _instant(_seconds):
+    return None
+
+
+class _Link:
+    def __init__(self, notes=None):
+        self.reads = []
+        self.notifies = []
+        self.writes = []
+        self.values = {
+            "00002a29-0000-1000-8000-00805f9b34fb": b"WHOOP",
+            "00002a24-0000-1000-8000-00805f9b34fb": b"MG",
+            "00002a25-0000-1000-8000-00805f9b34fb": b"SN",
+            "00002a26-0000-1000-8000-00805f9b34fb": b"5.0.1",
+            "00002a27-0000-1000-8000-00805f9b34fb": b"rev",
+            "00002a19-0000-1000-8000-00805f9b34fb": bytes([80]),
+        }
+        # flags: RR present, 8-bit HR 61, one interval of 1024 (1 second)
+        self.notes = notes if notes is not None else [bytes([0x10, 61]) + struct.pack("<H", 1024)]
+
+    async def read(self, uuid):
+        self.reads.append(uuid)
+        return self.values[uuid]
+
+    async def start_notify(self, uuid, callback):
+        self.notifies.append(uuid)
+        for note in self.notes:
+            callback(note)
+
+    async def stop_notify(self, uuid):
+        return None
+
+    async def write(self, uuid, data):
+        self.writes.append((uuid, data))
+        raise AssertionError("MG live path must not write")
 
 
 class SessionGuard(unittest.TestCase):

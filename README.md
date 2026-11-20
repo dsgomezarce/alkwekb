@@ -8,8 +8,9 @@ Heart Rate Measurement del Bluetooth SIG (`0x2A37`). Lo que esas notas no cierra
 (unidad RR del flujo propio de la correa, temperatura / óptica / pasos, alarma)
 sigue en el código importado y queda marcado como no verificado en este fork.
 WHOOP 5.0 / MG anuncia `fd4b0001-…`. `whoop.py info` lo elige si es la señal más fuerte
-(también si el nombre contiene WHOOP) y solo lista el GATT: no manda el handshake 4.0
-ni ningún comando MG.
+y solo lista el GATT. `whoop.py live` lee las cadenas de Device Information, la
+batería, y escucha `0x2A37` unos 15 s (RR en unidades de 1/1024 s). No escribe
+`fd4b0002` ni manda el handshake 4.0. Un `61080001` sigue el camino 4.0.
 
 ---
 
