@@ -3,9 +3,10 @@
 ``read_only_live`` reads the standard device-info strings, battery, and
 Heart Rate Measurement. ``read_only_listen`` subscribes to the four vendor
 notify characteristics plus Heart Rate Measurement and prints raw bytes.
-Neither function writes. fd4b0002 is the vendor command channel and is not
-touched. There is no 4.0 handshake, historical drain, history ack, alarm,
-or buzz.
+``bond_then_listen`` asks the operating system to pair, then does that
+same subscribe. None of them writes. fd4b0002 is the vendor command
+channel and is not touched. There is no 4.0 handshake, historical drain,
+history ack, alarm, or buzz.
 
 2A37 RR intervals are Bluetooth SIG units of 1/1024 s. On WHOOP DS that
 characteristic stayed silent for 15 seconds while the strap was worn.
@@ -21,6 +22,10 @@ from device.protocol import BATTERY_LEVEL, HR_MEASUREMENT, parse_heart_rate_meas
 
 LIVE_SECONDS = 15
 LISTEN_SECONDS = 20
+# How long to keep the connection up after macOS returns "encryption
+# insufficient", so the system pairing dialog can be answered.
+BOND_WAIT = 45
+PAIR_HINT = "If macOS shows a pairing dialog, tap Pair."
 
 # SIG short UUIDs Diego's read-only GATT listing showed as readable.
 DEVICE_INFO = (
@@ -196,3 +201,49 @@ async def read_only_listen(link, seconds=LISTEN_SECONDS, sleep=asyncio.sleep, em
         else:
             emit("No notifications in this window.")
     return {"notes": notes, "subscribed": opened}
+
+
+async def bond_then_listen(link, seconds=LISTEN_SECONDS, bond_wait=BOND_WAIT,
+                           sleep=asyncio.sleep, emit=None):
+    """Pair through the OS, then subscribe and print. No vendor write.
+
+    ``link.pair()`` is the platform pair call. CoreBluetooth has none, so
+    there it raises ``NotImplementedError`` and the dialog is the one
+    macOS shows when an encrypted characteristic is opened. The open used
+    here is a subscribe on ``fd4b0003``, the same characteristic that
+    returned "Encryption is insufficient." It is not a write to ``fd4b0002``.
+    """
+    for uuid in LISTEN_UUIDS:
+        _refuse_command(uuid)
+    if emit:
+        emit(PAIR_HINT)
+        emit("No write to fd4b0002. No handshake, drain, buzz, alarm, or history ack.")
+
+    try:
+        await link.pair()
+    except NotImplementedError:
+        if emit:
+            emit("This OS has no explicit pair call. Opening fd4b0003 so macOS can show its dialog.")
+        trigger = FD4B_NOTIFY[0]
+        try:
+            await link.start_notify(trigger, lambda _data: None)
+        except Exception as ex:
+            if emit:
+                emit(f"{trigger} bond trigger failed ({type(ex).__name__}: {ex})")
+                emit(f"Waiting {bond_wait:.0f}s. {PAIR_HINT}")
+            await sleep(bond_wait)
+        else:
+            try:
+                await link.stop_notify(trigger)
+            except Exception:
+                pass
+    except Exception as ex:
+        if emit:
+            emit(f"OS pair failed ({type(ex).__name__}: {ex})")
+            emit(PAIR_HINT)
+    else:
+        if emit:
+            emit("OS pair finished.")
+
+    heard = await read_only_listen(link, seconds=seconds, sleep=sleep, emit=emit)
+    return heard

@@ -17,7 +17,10 @@ import asyncio, struct, sys, time, csv, json, os, datetime as dt
 from bleak import BleakClient, BleakScanner
 
 from device.discover import command_address, rank
-from device.mg_live import LISTEN_SECONDS, LIVE_SECONDS, read_only_listen, read_only_live
+from device.mg_live import (
+    BOND_WAIT, LISTEN_SECONDS, LIVE_SECONDS, PAIR_HINT,
+    bond_then_listen, read_only_listen, read_only_live,
+)
 from device.protocol import (
     BATTERY_LEVEL, CMD_CHAR as _CMD, DESTRUCTIVE, HR_MEASUREMENT, NOTIFY_CHARS,
     OPTIONAL_NOTIFY, WHOOP4_SERVICE, build, connect_handshake, crc8,
@@ -520,6 +523,9 @@ class _BleakReadOnly:
     async def stop_notify(self, uuid):
         await self.client.stop_notify(uuid)
 
+    async def pair(self):
+        await self.client.pair()
+
 
 async def run_mg_live(address, seconds=LIVE_SECONDS):
     """Device-info, battery, and ~15s of standard HR. No vendor writes."""
@@ -535,6 +541,15 @@ async def run_mg_listen(address, seconds=LISTEN_SECONDS):
     print("WHOOP 5.0/MG read-only listen.")
     async with BleakClient(address, timeout=20.0) as client:
         return await read_only_listen(_BleakReadOnly(client), seconds=seconds, emit=print)
+
+
+async def run_mg_bond(address, seconds=LISTEN_SECONDS):
+    """OS pair, then the same read-only 20s listen. No vendor writes."""
+    print("WHOOP 5.0/MG bond, then read-only listen.")
+    print(PAIR_HINT)
+    print("fd4b0002 is not written. No handshake, drain, buzz, alarm, or history ack.")
+    async with BleakClient(address, timeout=20.0) as client:
+        return await bond_then_listen(_BleakReadOnly(client), seconds=seconds, emit=print)
 
 
 async def _mg_command(addr, mode):
@@ -555,6 +570,14 @@ async def _mg_command(addr, mode):
             await asyncio.wait_for(run_mg_listen(addr), CONNECT_TIMEOUT + LISTEN_SECONDS)
         except Exception as ex:
             print(f"read-only listen failed: {ex}")
+            print("Stopped. fd4b0002 was not written.")
+        return
+    if mode == "bond":
+        try:
+            await asyncio.wait_for(
+                run_mg_bond(addr), CONNECT_TIMEOUT + BOND_WAIT + LISTEN_SECONDS)
+        except Exception as ex:
+            print(f"bond-then-listen failed: {ex}")
             print("Stopped. fd4b0002 was not written.")
         return
     try:
@@ -592,19 +615,19 @@ async def cli():
             print(f"read-only connect failed: {ex}")
             return
         if kind == "mg":
-            if mode in ("live", "listen", "drain"):
+            if mode in ("live", "listen", "bond", "drain"):
                 await _mg_command(addr, mode)
             return
         if kind != "4.0":
             return
-        if mode == "listen":
-            print("listen is only for an fd4b strap. No 4.0 handshake is sent.")
+        if mode in ("listen", "bond"):
+            print(f"{mode} is only for an fd4b strap. No 4.0 handshake is sent.")
             return
         if mode != "info":
             print("GATT shows a WHOOP 4.0. Continuing with that command set.")
 
-    if mode == "listen":
-        print("listen is only for an fd4b strap. No 4.0 handshake is sent.")
+    if mode in ("listen", "bond"):
+        print(f"{mode} is only for an fd4b strap. No 4.0 handshake is sent.")
         return
 
     if mode not in ("info", "live", "drain"):

@@ -312,6 +312,68 @@ class MgListen(unittest.TestCase):
             mg._refuse_command(mg.FD4B_COMMAND)
 
 
+class MgBond(unittest.TestCase):
+    """OS pair, then the same subscribe-only listen. No radio and no vendor write."""
+
+    def test_pair_runs_before_the_listen(self):
+        from device.protocol import HR_MEASUREMENT
+        link = _BondLink({HR_MEASUREMENT: [b"\x00\x3c"]})
+        lines = []
+        slept = []
+
+        async def pause(seconds):
+            slept.append(seconds)
+
+        result = __import__("asyncio").run(
+            mg.bond_then_listen(link, sleep=pause, emit=lines.append))
+        self.assertEqual(link.calls[0], "pair")
+        self.assertEqual(link.writes, [])
+        self.assertNotIn(mg.FD4B_COMMAND, link.notifies)
+        self.assertEqual(link.notifies, list(mg.LISTEN_UUIDS))
+        self.assertEqual(result["notes"], [(HR_MEASUREMENT, b"\x00\x3c")])
+        self.assertIn(f"{HR_MEASUREMENT} 003c", lines)
+        self.assertIn(mg.PAIR_HINT, lines)
+        self.assertEqual(slept, [20])
+
+    def test_macos_waits_after_encryption_is_insufficient_then_listens(self):
+        from device.protocol import HR_MEASUREMENT
+        link = _BondLink(
+            {mg.FD4B_NOTIFY[2]: [b"\xab"], HR_MEASUREMENT: [b"\x00\x3c"]},
+            pair="unimplemented",
+            fail_first={mg.FD4B_NOTIFY[0]},
+        )
+        lines = []
+        slept = []
+
+        async def pause(seconds):
+            slept.append(seconds)
+
+        result = __import__("asyncio").run(
+            mg.bond_then_listen(link, sleep=pause, emit=lines.append))
+        self.assertEqual(link.calls[0], "pair")
+        self.assertEqual(slept, [45, 20])
+        self.assertEqual(link.writes, [])
+        self.assertNotIn(mg.FD4B_COMMAND, link.notifies)
+        self.assertEqual(result["subscribed"], list(mg.LISTEN_UUIDS))
+        self.assertIn(f"{mg.FD4B_NOTIFY[2]} ab", lines)
+        self.assertTrue(any("bond trigger failed" in line for line in lines))
+        self.assertGreaterEqual(lines.count(mg.PAIR_HINT), 1)
+        self.assertTrue(any("tap Pair" in line for line in lines))
+
+    def test_macos_skips_the_wait_when_the_trigger_is_already_accepted(self):
+        link = _BondLink({}, pair="unimplemented")
+        slept = []
+
+        async def pause(seconds):
+            slept.append(seconds)
+
+        __import__("asyncio").run(
+            mg.bond_then_listen(link, sleep=pause, emit=lambda _line: None))
+        self.assertEqual(slept, [20])
+        self.assertEqual(link.writes, [])
+        self.assertEqual(link.notifies.count(mg.FD4B_NOTIFY[0]), 2)
+
+
 async def _instant(_seconds):
     return None
 
@@ -342,6 +404,41 @@ class _NotifyLink:
     async def write(self, uuid, data):
         self.writes.append((uuid, bytes(data)))
         raise AssertionError("listen must not write")
+
+
+class _BondLink:
+    def __init__(self, packets, pair="ok", fail_first=()):
+        self.packets = packets
+        self.pair_mode = pair
+        self.fail_first = set(fail_first)
+        self.seen = set()
+        self.calls = []
+        self.notifies = []
+        self.writes = []
+
+    async def pair(self):
+        self.calls.append("pair")
+        if self.pair_mode == "unimplemented":
+            raise NotImplementedError("Pairing is not available in Core Bluetooth.")
+
+    async def start_notify(self, uuid, callback):
+        self.calls.append(("notify", uuid))
+        if uuid in self.fail_first and uuid not in self.seen:
+            self.seen.add(uuid)
+            raise OSError('CBATTErrorDomain Code=15 "Encryption is insufficient."')
+        self.notifies.append(uuid)
+        for note in self.packets.get(uuid, []):
+            callback(note)
+
+    async def stop_notify(self, uuid):
+        self.calls.append(("stop", uuid))
+
+    async def read(self, uuid):
+        raise AssertionError("bond path must not read")
+
+    async def write(self, uuid, data):
+        self.writes.append((uuid, bytes(data)))
+        raise AssertionError("bond path must not write")
 
 
 class _Link:
