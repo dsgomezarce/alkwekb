@@ -18,8 +18,8 @@ from bleak import BleakClient, BleakScanner
 
 from device.discover import command_address, rank
 from device.mg_live import (
-    BOND_WAIT, LISTEN_SECONDS, LIVE_SECONDS, PAIR_HINT,
-    bond_then_listen, read_only_listen, read_only_live,
+    BOND_WAIT, CLIENT_HELLO, FD4B_COMMAND, LISTEN_SECONDS, LIVE_SECONDS, PAIR_HINT,
+    bond_then_listen, read_only_listen, read_only_live, start_published,
 )
 from device.protocol import (
     BATTERY_LEVEL, CMD_CHAR as _CMD, DESTRUCTIVE, HR_MEASUREMENT, NOTIFY_CHARS,
@@ -507,7 +507,7 @@ async def read_only_gatt(address):
 
 
 class _BleakReadOnly:
-    """Reads and notifies. Has no write method, so the MG live path cannot send one."""
+    """Reads and notifies. The only write it will pass on is CLIENT_HELLO."""
 
     def __init__(self, client):
         self.client = client
@@ -526,6 +526,12 @@ class _BleakReadOnly:
     async def pair(self):
         await self.client.pair()
 
+    async def write(self, uuid, data, response=False):
+        payload = bytes(data)
+        if str(uuid).lower() != FD4B_COMMAND or payload != CLIENT_HELLO or response is not True:
+            raise RuntimeError("refusing write: only CLIENT_HELLO with response is sent to fd4b0002")
+        await self.client.write_gatt_char(uuid, payload, response=True)
+
 
 async def run_mg_live(address, seconds=LIVE_SECONDS):
     """Device-info, battery, and ~15s of standard HR. No vendor writes."""
@@ -541,6 +547,15 @@ async def run_mg_listen(address, seconds=LISTEN_SECONDS):
     print("WHOOP 5.0/MG read-only listen.")
     async with BleakClient(address, timeout=20.0) as client:
         return await read_only_listen(_BleakReadOnly(client), seconds=seconds, emit=print)
+
+
+async def run_mg_start(address, seconds=LISTEN_SECONDS):
+    """Subscribe, send the published CLIENT_HELLO once, print for ~20s."""
+    print("WHOOP 5.0/MG published session start.")
+    print("One write: CLIENT_HELLO to fd4b0002, with response.")
+    print("No drain, history ack, buzz, alarm, reboot, DFU, or trim.")
+    async with BleakClient(address, timeout=20.0) as client:
+        return await start_published(_BleakReadOnly(client), seconds=seconds, emit=print)
 
 
 async def run_mg_bond(address, seconds=LISTEN_SECONDS):
@@ -580,6 +595,13 @@ async def _mg_command(addr, mode):
             print(f"bond-then-listen failed: {ex}")
             print("Stopped. fd4b0002 was not written.")
         return
+    if mode == "start":
+        try:
+            await asyncio.wait_for(run_mg_start(addr), CONNECT_TIMEOUT + LISTEN_SECONDS)
+        except Exception as ex:
+            print(f"start failed: {ex}")
+            print("Stopped. No second command was sent.")
+        return
     try:
         await asyncio.wait_for(read_only_gatt(addr), CONNECT_TIMEOUT)
     except Exception as ex:
@@ -615,18 +637,18 @@ async def cli():
             print(f"read-only connect failed: {ex}")
             return
         if kind == "mg":
-            if mode in ("live", "listen", "bond", "drain"):
+            if mode in ("live", "listen", "bond", "start", "drain"):
                 await _mg_command(addr, mode)
             return
         if kind != "4.0":
             return
-        if mode in ("listen", "bond"):
+        if mode in ("listen", "bond", "start"):
             print(f"{mode} is only for an fd4b strap. No 4.0 handshake is sent.")
             return
         if mode != "info":
             print("GATT shows a WHOOP 4.0. Continuing with that command set.")
 
-    if mode in ("listen", "bond"):
+    if mode in ("listen", "bond", "start"):
         print(f"{mode} is only for an fd4b strap. No 4.0 handshake is sent.")
         return
 

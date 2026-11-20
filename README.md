@@ -12,8 +12,10 @@ y solo lista el GATT. `whoop.py live` lee las cadenas de Device Information, la
 batería, y escucha `0x2A37` unos 15 s (RR en unidades de 1/1024 s). `whoop.py listen`
 se suscribe unos 20 s a `fd4b0003`, `fd4b0004`, `fd4b0005`, `fd4b0007` y `0x2A37`,
 e imprime cada aviso como UUID y hex. `whoop.py bond` pide el emparejamiento del
-sistema y después hace esa misma escucha. No escribe `fd4b0002`, no manda el
-handshake 4.0, y no vacía el historial. Un `61080001` sigue el camino 4.0.
+sistema y después hace esa misma escucha. `whoop.py start` se suscribe y luego
+escribe una sola vez el `CLIENT_HELLO` publicado (16 bytes, `GET_HELLO`) en
+`fd4b0002`, con respuesta, y escucha unos 20 s. No vacía el historial, no manda
+el handshake 4.0, y un `61080001` sigue el camino 4.0.
 
 ---
 

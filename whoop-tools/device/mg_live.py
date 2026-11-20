@@ -4,9 +4,10 @@
 Heart Rate Measurement. ``read_only_listen`` subscribes to the four vendor
 notify characteristics plus Heart Rate Measurement and prints raw bytes.
 ``bond_then_listen`` asks the operating system to pair, then does that
-same subscribe. None of them writes. fd4b0002 is the vendor command
-channel and is not touched. There is no 4.0 handshake, historical drain,
-history ack, alarm, or buzz.
+same subscribe. ``start_published`` is the one path that writes, and the
+only bytes it writes are the published 16-byte CLIENT_HELLO. There is no
+4.0 handshake, historical drain, history ack, alarm, buzz, reboot, DFU,
+or trim.
 
 2A37 RR intervals are Bluetooth SIG units of 1/1024 s. On WHOOP DS that
 characteristic stayed silent for 15 seconds while the strap was worn.
@@ -42,6 +43,15 @@ _FD4B = "fd4b000{}-cce1-4033-93ce-002d5875f58a"
 FD4B_NOTIFY = (_FD4B.format(3), _FD4B.format(4), _FD4B.format(5), _FD4B.format(7))
 # listen subscribes to these and nothing else. fd4b0002 is not in the tuple.
 LISTEN_UUIDS = FD4B_NOTIFY + (HR_MEASUREMENT,)
+
+# WHOOP 5.0 / MG session start. Not built here: copied from NOOP
+# DeviceFamily.whoop5ClientHello, which quotes GooseHello.clientHelloFrameHex
+# "aa0108000001e67123019101363e5c8d". Inner bytes are type 0x23, seq 0x01,
+# cmd 0x91 GET_HELLO, b3 0x01, and no payload. It is not SEND_HISTORICAL.
+CLIENT_HELLO = bytes((
+    0xAA, 0x01, 0x08, 0x00, 0x00, 0x01, 0xE6, 0x71,
+    0x23, 0x01, 0x91, 0x01, 0x36, 0x3E, 0x5C, 0x8D,
+))
 
 READS = tuple(uuid for _name, uuid in DEVICE_INFO) + (BATTERY_LEVEL,)
 NOTIFIES = (HR_MEASUREMENT,)
@@ -247,3 +257,60 @@ async def bond_then_listen(link, seconds=LISTEN_SECONDS, bond_wait=BOND_WAIT,
 
     heard = await read_only_listen(link, seconds=seconds, sleep=sleep, emit=emit)
     return heard
+
+
+async def start_published(link, seconds=LISTEN_SECONDS, sleep=asyncio.sleep, emit=None):
+    """Subscribe, write the published CLIENT_HELLO once, then print for ~20s.
+
+    ``link.write(uuid, data, response=True)`` is called once. ``data`` is
+    ``CLIENT_HELLO`` and ``uuid`` is ``fd4b0002``. A failed subscribe does
+    not add another write. A failed write does not add one either.
+    """
+    if CLIENT_HELLO != bytes.fromhex("aa0108000001e67123019101363e5c8d"):
+        raise RuntimeError("CLIENT_HELLO no longer matches the published frame")
+    notes = []
+    opened = []
+
+    def on_uuid(uuid):
+        def on_data(data):
+            raw = bytes(data)
+            notes.append((uuid, raw))
+            if emit:
+                emit(format_note(uuid, raw))
+        return on_data
+
+    if emit:
+        emit(f"Subscribing, then one write-with-response of CLIENT_HELLO ({CLIENT_HELLO.hex()}).")
+        emit("No drain, history ack, buzz, alarm, reboot, DFU, or trim.")
+
+    for uuid in LISTEN_UUIDS:
+        _refuse_command(uuid)
+        try:
+            await link.start_notify(uuid, on_uuid(uuid))
+        except Exception as ex:
+            if emit:
+                emit(f"{uuid} subscribe failed ({type(ex).__name__}: {ex})")
+            continue
+        opened.append(uuid)
+
+    wrote = False
+    try:
+        await link.write(FD4B_COMMAND, CLIENT_HELLO, response=True)
+        wrote = True
+        if emit:
+            emit(f"{FD4B_COMMAND} {CLIENT_HELLO.hex()}")
+    except Exception as ex:
+        if emit:
+            emit(f"{FD4B_COMMAND} write failed ({type(ex).__name__}: {ex})")
+
+    try:
+        await sleep(seconds)
+    finally:
+        for uuid in opened:
+            try:
+                await link.stop_notify(uuid)
+            except Exception:
+                pass
+    if emit and not notes:
+        emit("No notifications in this window.")
+    return {"notes": notes, "subscribed": opened, "wrote": wrote}

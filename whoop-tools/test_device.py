@@ -374,6 +374,78 @@ class MgBond(unittest.TestCase):
         self.assertEqual(link.notifies.count(mg.FD4B_NOTIFY[0]), 2)
 
 
+class MgStart(unittest.TestCase):
+    """One published CLIENT_HELLO after subscribe. No other command, no radio."""
+
+    def test_the_frame_is_the_published_hello(self):
+        self.assertEqual(mg.CLIENT_HELLO.hex(), "aa0108000001e67123019101363e5c8d")
+        self.assertEqual(len(mg.CLIENT_HELLO), 16)
+        self.assertEqual(mg.CLIENT_HELLO[10], 0x91)
+        self.assertNotEqual(mg.CLIENT_HELLO[10], 0x16)
+
+    def test_subscribes_then_writes_hello_once_and_prints_hex(self):
+        from device.protocol import HR_MEASUREMENT
+        link = _StartLink({HR_MEASUREMENT: [b"\x00\x3c"]})
+        lines = []
+        slept = []
+
+        async def pause(seconds):
+            slept.append(seconds)
+
+        result = __import__("asyncio").run(
+            mg.start_published(link, sleep=pause, emit=lines.append))
+        self.assertEqual(link.notifies, list(mg.LISTEN_UUIDS))
+        self.assertLess(link.calls.index(("notify", mg.FD4B_NOTIFY[0])), link.calls.index("write"))
+        self.assertEqual(link.writes, [(mg.FD4B_COMMAND, mg.CLIENT_HELLO, True)])
+        self.assertTrue(result["wrote"])
+        self.assertEqual(slept, [20])
+        self.assertIn(f"{HR_MEASUREMENT} 003c", lines)
+        self.assertIn(f"{mg.FD4B_COMMAND} {mg.CLIENT_HELLO.hex()}", lines)
+        self.assertIn(f"{mg.FD4B_NOTIFY[0]} aa01", lines)
+
+    def test_a_refused_subscribe_still_sends_only_the_hello(self):
+        from device.protocol import HR_MEASUREMENT
+        link = _StartLink({}, fail=set(mg.FD4B_NOTIFY))
+        result = __import__("asyncio").run(
+            mg.start_published(link, sleep=_instant, emit=lambda _line: None))
+        self.assertEqual(result["subscribed"], [HR_MEASUREMENT])
+        self.assertEqual(link.writes, [(mg.FD4B_COMMAND, mg.CLIENT_HELLO, True)])
+
+    def test_a_failed_write_is_not_retried(self):
+        link = _StartLink({}, write_error='Code=15 "Encryption is insufficient."')
+        lines = []
+        result = __import__("asyncio").run(
+            mg.start_published(link, sleep=_instant, emit=lines.append))
+        self.assertFalse(result["wrote"])
+        self.assertEqual(len(link.writes), 1)
+        self.assertEqual(result["notes"], [])
+        self.assertTrue(any("write failed" in line for line in lines))
+        self.assertTrue(any(line == "No notifications in this window." for line in lines))
+
+    def test_the_radio_wrapper_rejects_any_other_write(self):
+        class Client:
+            def __init__(self):
+                self.writes = []
+
+            async def write_gatt_char(self, uuid, data, response=None):
+                self.writes.append((uuid, bytes(data), response))
+
+        client = Client()
+        link = whoop._BleakReadOnly(client)
+
+        async def run():
+            await link.write(mg.FD4B_COMMAND, mg.CLIENT_HELLO, response=True)
+            with self.assertRaises(RuntimeError):
+                await link.write(mg.FD4B_COMMAND, b"\x00", response=True)
+            with self.assertRaises(RuntimeError):
+                await link.write(mg.FD4B_NOTIFY[0], mg.CLIENT_HELLO, response=True)
+            with self.assertRaises(RuntimeError):
+                await link.write(mg.FD4B_COMMAND, mg.CLIENT_HELLO, response=False)
+
+        __import__("asyncio").run(run())
+        self.assertEqual(client.writes, [(mg.FD4B_COMMAND, mg.CLIENT_HELLO, True)])
+
+
 async def _instant(_seconds):
     return None
 
@@ -439,6 +511,38 @@ class _BondLink:
     async def write(self, uuid, data):
         self.writes.append((uuid, bytes(data)))
         raise AssertionError("bond path must not write")
+
+
+class _StartLink:
+    def __init__(self, packets, fail=(), write_error=None):
+        self.packets = packets
+        self.fail = set(fail)
+        self.write_error = write_error
+        self.notifies = []
+        self.writes = []
+        self.calls = []
+        self.callbacks = {}
+
+    async def start_notify(self, uuid, callback):
+        self.calls.append(("notify", uuid))
+        if uuid in self.fail:
+            raise OSError('CBATTErrorDomain Code=15 "Encryption is insufficient."')
+        self.notifies.append(uuid)
+        self.callbacks[uuid] = callback
+        for note in self.packets.get(uuid, []):
+            callback(note)
+
+    async def write(self, uuid, data, response=False):
+        self.calls.append("write")
+        self.writes.append((uuid, bytes(data), response))
+        if self.write_error:
+            raise OSError(self.write_error)
+        reply = self.callbacks.get(mg.FD4B_NOTIFY[0])
+        if reply:
+            reply(b"\xaa\x01")
+
+    async def stop_notify(self, uuid):
+        return None
 
 
 class _Link:
