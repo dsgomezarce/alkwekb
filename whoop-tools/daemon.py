@@ -37,11 +37,19 @@ def log(*a):
 
 
 async def find_strap(timeout=15.0):
-    """Quiet scan for a WHOOP by its service UUID. Returns an address or None."""
-    from bleak import BleakScanner
-    d = await BleakScanner.find_device_by_filter(
-        lambda dev, adv: whoop.WHOOP_SVC in (adv.service_uuids or []), timeout=timeout)
-    return d.address if d else None
+    """Nearest WHOOP 4.0, or None.
+
+    Uses the same ranking as ``whoop.py info``. A nearer 5.0/MG (fd4b) wins the
+    ranking and this returns None, so the daemon does not fall through to a
+    weaker 4.0 and does not write the 4.0 handshake to the MG strap.
+    """
+    ranked = await whoop.scan(timeout)
+    best = ranked[0] if ranked else None
+    addr = whoop.command_address(best)
+    if best and not addr:
+        log(f"nearest strap is {best.get('name') or 'unnamed'} "
+            f"({best.get('family') or 'name only'}); 4.0 commands stay off")
+    return addr
 
 
 class Daemon:

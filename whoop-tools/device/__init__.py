@@ -6,6 +6,7 @@ codec, and the connect commands. See ``protocol.py`` for which bytes come from
 public sources and which claims this fork does not repeat without a strap.
 """
 
+from device.discover import choose, family_of, matches, rank
 from device.protocol import (
     BATTERY_LEVEL,
     CMD_CHAR,
@@ -23,6 +24,10 @@ from device.protocol import (
 )
 
 __all__ = [
+    "choose",
+    "family_of",
+    "matches",
+    "rank",
     "BATTERY_LEVEL",
     "CMD_CHAR",
     "DESTRUCTIVE",

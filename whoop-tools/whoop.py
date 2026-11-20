@@ -16,6 +16,7 @@ CLI:  whoop.py info | live | drain
 import asyncio, struct, sys, time, csv, json, os, datetime as dt
 from bleak import BleakClient, BleakScanner
 
+from device.discover import command_address, rank
 from device.protocol import (
     BATTERY_LEVEL, CMD_CHAR as _CMD, DESTRUCTIVE, HR_MEASUREMENT, NOTIFY_CHARS,
     OPTIONAL_NOTIFY, WHOOP4_SERVICE, build, connect_handshake, crc8,
@@ -418,19 +419,129 @@ class Whoop:
 
 
 # ------------------------- CLI -------------------------
-async def find():
-    print("scanning...")
-    d = await BleakScanner.find_device_by_filter(
-        lambda dev, adv: WHOOP_SVC in (adv.service_uuids or []), timeout=15.0)
-    return d.address if d else None
+def _advert_record(address, dev, adv):
+    services = list(adv.service_uuids or [])
+    services.extend(getattr(adv, "service_data", {}).keys())
+    return {
+        "name": dev.name or adv.local_name or "",
+        "address": dev.address or address,
+        "rssi": adv.rssi,
+        "services": services,
+    }
+
+
+async def scan(timeout=15.0):
+    """Nearby strap candidates, nearest first. Does not connect."""
+    found = await BleakScanner.discover(timeout=timeout, return_adv=True)
+    records = [_advert_record(addr, dev, adv) for addr, (dev, adv) in found.items()]
+    return rank(records)
+
+
+async def discover(timeout=15.0):
+    """Nearest candidate (4.0, 5.0/MG, or a WHOOP name), or None."""
+    ranked = await scan(timeout)
+    return ranked[0] if ranked else None
+
+
+async def find(timeout=15.0):
+    """Address for the 4.0 command path only.
+
+    When the nearest strap is 5.0/MG, returns None instead of a weaker 4.0
+    that happens to be in range. The MG command set is not implemented, and
+    the 4.0 handshake must not be written to fd4b.
+    """
+    return command_address(await discover(timeout))
+
+
+def _show_choice(ranked):
+    for rec in ranked:
+        role = "selected" if rec is ranked[0] else "skipped "
+        svcs = ",".join(rec.get("services") or []) or "-"
+        print(f"  {role}  rssi {rec.get('rssi')}  {rec.get('name') or '?'}  {svcs}")
+    chosen = ranked[0]
+    family = chosen.get("family")
+    if family == "mg":
+        print("Nearest strap advertises fd4b0001 (WHOOP 5.0/MG).")
+        print("The 4.0 handshake is not sent. Connecting read-only to list GATT.")
+    elif family == "4.0":
+        print("Nearest strap advertises 61080001 (WHOOP 4.0).")
+    else:
+        print("Nearest strap matched the name WHOOP. GATT will decide before any command.")
+
+
+async def read_only_gatt(address):
+    """Connect, print service and characteristic UUIDs, write nothing.
+
+    Returns ``"mg"``, ``"4.0"``, or ``"unknown"`` from the services actually
+    discovered. No notify subscription and no command frame.
+    """
+    print("Connecting read-only. No command is written.")
+    async with BleakClient(address, timeout=20.0) as client:
+        services = list(client.services or [])
+        if not services:
+            print("GATT table was empty.")
+            return "unknown"
+        kind = "unknown"
+        for service in services:
+            uid = str(service.uuid).lower()
+            print(f"SERVICE {service.uuid}")
+            if uid.startswith("fd4b0001"):
+                kind = "mg"
+            elif uid.startswith("61080001") and kind != "mg":
+                kind = "4.0"
+            for char in service.characteristics:
+                props = ",".join(char.properties)
+                print(f"  CHAR {char.uuid} [{props}]")
+        if kind == "mg":
+            print("Service fd4b0001 is present. MG commands are not implemented.")
+            print("Stopped. Nothing was drained, and no alarm or buzz was sent.")
+        elif kind == "4.0":
+            print("Service 61080001 is present.")
+        else:
+            print("No WHOOP command service in this GATT table. Stopped.")
+        return kind
 
 
 async def cli():
     mode = sys.argv[1] if len(sys.argv) > 1 else "info"
-    addr = sys.argv[2] if len(sys.argv) > 2 else await find()
-    if not addr:
-        print("WHOOP not found (close the phone app — one bond at a time).")
+    if len(sys.argv) > 2:
+        addr = sys.argv[2]
+        family = None
+        print("Address was passed in. GATT is read before any 4.0 command.")
+    else:
+        print("scanning...")
+        ranked = await scan()
+        if not ranked:
+            print("WHOOP not found (close the phone app — one bond at a time).")
+            return
+        _show_choice(ranked)
+        chosen = ranked[0]
+        addr = chosen["address"]
+        family = chosen.get("family")
+
+    if family == "mg":
+        try:
+            await asyncio.wait_for(read_only_gatt(addr), CONNECT_TIMEOUT)
+        except Exception as ex:
+            print(f"read-only connect failed: {ex}")
+            print("Stopped. The 4.0 handshake was not sent.")
         return
+
+    if family is None:
+        try:
+            kind = await asyncio.wait_for(read_only_gatt(addr), CONNECT_TIMEOUT)
+        except Exception as ex:
+            print(f"read-only connect failed: {ex}")
+            return
+        if kind != "4.0":
+            return
+        if mode != "info":
+            print("GATT shows a WHOOP 4.0. Continuing with that command set.")
+
+    if mode not in ("info", "live", "drain"):
+        print(f"Unknown mode {mode!r}.")
+        return
+
     async with Whoop(addr) as w:
         print("connected", addr)
         await w.init()

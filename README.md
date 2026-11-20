@@ -7,7 +7,9 @@ handshake de conexión salen de las notas públicas de NOOP y OpenStrap, más el
 Heart Rate Measurement del Bluetooth SIG (`0x2A37`). Lo que esas notas no cierran
 (unidad RR del flujo propio de la correa, temperatura / óptica / pasos, alarma)
 sigue en el código importado y queda marcado como no verificado en este fork.
-WHOOP 5.0 / MG usa otro servicio y no se habla.
+WHOOP 5.0 / MG anuncia `fd4b0001-…`. `whoop.py info` lo elige si es la señal más fuerte
+(también si el nombre contiene WHOOP) y solo lista el GATT: no manda el handshake 4.0
+ni ningún comando MG.
 
 ---
 

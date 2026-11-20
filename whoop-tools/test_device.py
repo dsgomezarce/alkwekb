@@ -7,6 +7,7 @@ the codec follows that envelope. It is not a new capture.
 import struct
 import unittest
 
+import device.discover as discover
 import device.protocol as proto
 import whoop
 
@@ -142,6 +143,64 @@ class Parse(unittest.TestCase):
         inner = bytes([0x28, 0]) + struct.pack("<IH", 99, 7) + bytes([55, 1]) + struct.pack("<H", 1100)
         parsed = proto.parse_agreed_realtime(inner)
         self.assertEqual((parsed["ts"], parsed["subsec"], parsed["hr"], parsed["rr_raw"]), (99, 7, 55, [1100]))
+
+
+class Discovery(unittest.TestCase):
+    """Diego's scan: a near MG named WHOOP DS, a far 4.0 named WHOOP GOAT.
+
+    Addresses are not part of the decision. macOS rotates them.
+    """
+
+    DS = {
+        "name": "WHOOP DS",
+        "rssi": -57,
+        "services": ["fd4b0001-cce1-4033-93ce-002d5875f58a"],
+        "address": "near-rotating-id",
+    }
+    GOAT = {
+        "name": "WHOOP GOAT",
+        "rssi": -95,
+        "services": [
+            "0000180d-0000-1000-8000-00805f9b34fb",
+            "61080001-8d6d-82b8-614a-1c8cb0f8dcc6",
+        ],
+        "address": "far-rotating-id",
+    }
+
+    def test_near_mg_is_chosen_over_the_distant_4(self):
+        # GOAT is listed first. A first-match scan would pick it.
+        chosen = discover.choose([self.GOAT, self.DS])
+        self.assertEqual(chosen["name"], "WHOOP DS")
+        self.assertEqual(chosen["family"], "mg")
+        self.assertIsNone(discover.command_address(chosen))
+        names = [rec["name"] for rec in discover.rank([self.GOAT, self.DS])]
+        self.assertEqual(names, ["WHOOP DS", "WHOOP GOAT"])
+
+    def test_stronger_rssi_is_the_rule(self):
+        nearer_goat = dict(self.GOAT, rssi=-40)
+        far_ds = dict(self.DS, rssi=-90)
+        chosen = discover.choose([far_ds, nearer_goat])
+        self.assertEqual(chosen["name"], "WHOOP GOAT")
+        self.assertEqual(chosen["family"], "4.0")
+        self.assertEqual(discover.command_address(chosen), "far-rotating-id")
+
+    def test_name_whoop_matches_without_a_service(self):
+        chosen = discover.choose([{"name": "Whoop", "rssi": -60, "services": []}])
+        self.assertEqual(chosen["name"], "Whoop")
+        self.assertIsNone(chosen["family"])
+        self.assertIsNone(discover.command_address(chosen))
+
+    def test_unrelated_device_is_ignored(self):
+        self.assertIsNone(discover.choose([{
+            "name": "Headphones",
+            "rssi": -30,
+            "services": ["0000180d-0000-1000-8000-00805f9b34fb"],
+        }]))
+
+    def test_missing_rssi_loses_to_a_reading(self):
+        mute = dict(self.DS, rssi=None)
+        chosen = discover.choose([mute, self.GOAT])
+        self.assertEqual(chosen["name"], "WHOOP GOAT")
 
 
 class SessionGuard(unittest.TestCase):
