@@ -42,6 +42,16 @@ PROFILE_PATH = "/userprofile-service/userprofile/settings"
 # The published spec has no separate "my devices" list.
 WELLNESS_ACTIVITY_PATH = "/wellnessactivity-service/activity/summary/range"
 WELLNESS_SPAN = 28
+# Published: GET /weight-service/weight/range/{start}/{end}?includeAll=true
+# latestWeight.weight is kilograms. /weight/all is capped at 364 days, so the
+# range call is walked in spans of that size.
+WEIGHT_PATH = "/weight-service/weight/range"
+WEIGHT_SPAN = 364
+# Published: GET /metrics-service/metrics/maxmet/daily/{start}/{end}?sport=RUNNING&sport=CYCLING
+# MaxMetDTO has generic, cycling, and rowing. There is no running key: RUNNING
+# comes back as generic.vo2MaxPreciseValue. Cycling is cycling.vo2MaxPreciseValue.
+VO2_PATH = "/metrics-service/metrics/maxmet/daily"
+VO2_SPAN = 28
 
 DEFAULT_DAYS = 365
 OVERLAP_DAYS = 2
@@ -551,6 +561,87 @@ def store_profile(c, settings):
         db.upsert(c, "api_profile", {"key": "first_name", "value": name.split()[0]})
 
 
+def weight_by_day(payload):
+    """Kilograms from WeightRangeDTO.dailyWeightSummaries or a list of DateWeightDTO."""
+    out = {}
+    if isinstance(payload, dict):
+        rows = payload.get("dailyWeightSummaries") or []
+    elif isinstance(payload, list):
+        rows = payload
+    else:
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        latest = row.get("latestWeight") if isinstance(row.get("latestWeight"), dict) else row
+        day = row.get("summaryDate") or latest.get("calendarDate") or row.get("calendarDate")
+        weight = _num(latest.get("weight"))
+        if weight is None and isinstance(row.get("allWeightMetrics"), list):
+            for entry in row["allWeightMetrics"]:
+                if isinstance(entry, dict) and _num(entry.get("weight")) is not None:
+                    weight = _num(entry.get("weight"))
+                    day = day or entry.get("calendarDate")
+        if day and weight is not None:
+            out[str(day)[:10]] = weight
+    return out
+
+
+def vo2_by_day(payload):
+    """Running and cycling VO2 Max from MaxMetDTO.
+
+    The published object has generic, cycling, and rowing. RUNNING is generic.
+    A running key is used when a response includes one.
+    """
+    out = {}
+    if isinstance(payload, dict):
+        rows = [payload]
+    elif isinstance(payload, list):
+        rows = payload
+    else:
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        running = row.get("running") if isinstance(row.get("running"), dict) else row.get("generic")
+        cycling = row.get("cycling") if isinstance(row.get("cycling"), dict) else None
+        for block, key in ((running, "vo2_run"), (cycling, "vo2_cycle")):
+            if not isinstance(block, dict):
+                continue
+            day = block.get("calendarDate")
+            val = _num(block.get("vo2MaxPreciseValue"))
+            if val is None:
+                val = _num(block.get("vo2MaxValue"))
+            if day and val is not None:
+                out.setdefault(str(day)[:10], {})[key] = val
+    return out
+
+
+def store_metrics(c, weights, vo2s):
+    """One row per day that has a weight or a VO2 Max. Absent fields stay as they were."""
+    stored = 0
+    for day in sorted(set(weights) | set(vo2s)):
+        fields = {}
+        if day in weights:
+            fields["weight_kg"] = weights[day]
+        fields.update(vo2s.get(day) or {})
+        if not fields:
+            continue
+        existing = c.execute(
+            "SELECT weight_kg, vo2_run, vo2_cycle FROM garmin_metric WHERE date=?", (day,)).fetchone()
+        row = {
+            "date": day,
+            "at": f"{day}T12:00:00",
+            "weight_kg": existing["weight_kg"] if existing else None,
+            "vo2_run": existing["vo2_run"] if existing else None,
+            "vo2_cycle": existing["vo2_cycle"] if existing else None,
+            "source": SOURCE,
+        }
+        row.update(fields)
+        db.upsert(c, "garmin_metric", row)
+        stored += 1
+    return stored
+
+
 def _summary_by_day(payload):
     out = {}
     for row in _as_list(payload):
@@ -600,11 +691,20 @@ class Sync:
         except GarminError as ex:
             print("profile:", ex)
         dailies, summary_holes = self._dailies(start, end)
+        weights, weight_holes = self._span_map(
+            start, end, WEIGHT_SPAN, "weight",
+            lambda a, b: f"{WEIGHT_PATH}/{a}/{b}", {"includeAll": "true"}, weight_by_day)
+        vo2s, vo2_holes = self._span_map(
+            start, end, VO2_SPAN, "vo2",
+            lambda a, b: f"{VO2_PATH}/{a}/{b}",
+            {"sport": ["RUNNING", "CYCLING"]}, vo2_by_day)
+        counts_metrics = store_metrics(self.c, weights, vo2s)
         activities = self._activities(start, end)
-        counts = {"heart": 0, "heart_kept": 0, "sleep": 0, "days": 0, "workout": 0, "skipped": 0}
+        counts = {"heart": 0, "heart_kept": 0, "sleep": 0, "days": 0, "workout": 0,
+                  "metrics": counts_metrics, "skipped": 0}
         latest = None
         failed = []
-        hole = set(summary_holes)
+        hole = set(summary_holes) | set(weight_holes) | set(vo2_holes)
         for day in iter_days(start, end):
             heart, heart_ok = self._get(HEART_PATH, {"date": day}, "heart")
             sleep, sleep_ok = self._get(SLEEP_PATH, {"date": day}, "sleep")
@@ -650,17 +750,23 @@ class Sync:
         self.c.commit()
         return counts, start, end
 
-    def _get(self, path, params, label):
-        """Returns (payload, ok). ok is False when the request failed, including a 429."""
+    def _get(self, path, params, label, quiet=False):
+        """Returns (payload, ok). ok is False when the request failed, including a 429.
+
+        quiet skips the log line. Daily summaries use that for the first try:
+        a 500 there is retried, then the year continues in smaller spans, so the
+        line must not read as if the sync stopped.
+        """
         try:
             return self.client.get(path, params), True
         except GarminError as ex:
-            day = ""
-            if isinstance(params, dict) and params.get("date"):
-                day = " " + str(params["date"])
-            elif isinstance(path, str) and path.startswith(HRV_PATH + "/"):
-                day = " " + path.rsplit("/", 1)[-1]
-            print(f"{label}{day}:", ex)
+            if not quiet:
+                day = ""
+                if isinstance(params, dict) and params.get("date"):
+                    day = " " + str(params["date"])
+                elif isinstance(path, str) and path.startswith(HRV_PATH + "/"):
+                    day = " " + path.rsplit("/", 1)[-1]
+                print(f"{label}{day}:", ex)
             return None, False
 
     def _dailies(self, start, end):
@@ -671,21 +777,58 @@ class Sync:
         for the next sync. Heart rate, sleep, and activities still run.
         """
         payload, ok = self._get(
-            DAILIES_PATH, {"startDate": start, "endDate": end}, "daily summaries")
+            DAILIES_PATH, {"startDate": start, "endDate": end}, "daily summaries", quiet=True)
         if ok:
             return _summary_by_day(payload), []
         if len(list(iter_days(start, end))) <= DAILY_SPAN:
+            print(f"daily summaries {start}–{end}: saved to retry")
             return {}, list(iter_days(start, end))
+        print(f"daily summaries: server error on {start}–{end}, continuing in {DAILY_SPAN}-day spans")
         merged, holes = {}, []
         span_start = start
         while span_start <= end:
             span_end = min(end, _shift_day(span_start, DAILY_SPAN - 1))
             payload, ok = self._get(
-                DAILIES_PATH, {"startDate": span_start, "endDate": span_end}, "daily summaries")
+                DAILIES_PATH, {"startDate": span_start, "endDate": span_end},
+                "daily summaries", quiet=True)
             if ok:
                 merged.update(_summary_by_day(payload))
             else:
                 holes.extend(iter_days(span_start, span_end))
+                print(f"daily summaries {span_start}–{span_end}: saved to retry")
+            span_start = _shift_day(span_end, 1)
+        return merged, holes
+
+    def _span_map(self, start, end, span, label, path_for, params, parse):
+        """Fetch a date-range endpoint. A failure walks the window in smaller spans.
+
+        An empty 200 is not a hole. A 500 that survives the retry is: those days
+        are saved for the next sync, and the rest of the year continues.
+        """
+        def once(a, b):
+            payload, ok = self._get(path_for(a, b), params, label)
+            if not ok:
+                return None
+            return parse(payload)
+
+        parsed = once(start, end)
+        if parsed is not None:
+            return parsed, []
+        if len(list(iter_days(start, end))) <= span:
+            return {}, list(iter_days(start, end))
+        merged, holes = {}, []
+        span_start = start
+        while span_start <= end:
+            span_end = min(end, _shift_day(span_start, span - 1))
+            parsed = once(span_start, span_end)
+            if parsed is None:
+                holes.extend(iter_days(span_start, span_end))
+            elif isinstance(parsed, dict):
+                for day, val in parsed.items():
+                    if isinstance(val, dict):
+                        merged.setdefault(day, {}).update(val)
+                    else:
+                        merged[day] = val
             span_start = _shift_day(span_end, 1)
         return merged, holes
 

@@ -61,6 +61,10 @@ CREATE TABLE IF NOT EXISTS daily_night (date TEXT PRIMARY KEY, rhr REAL, hrv REA
 
 CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT);
 
+-- Garmin weight (kg) and VO2 Max. date is the calendar day from the Personal API.
+CREATE TABLE IF NOT EXISTS garmin_metric (
+  date TEXT PRIMARY KEY, at TEXT, weight_kg REAL, vo2_run REAL, vo2_cycle REAL, source TEXT);
+
 -- Requests for the strap from other programs (dashboard, CLI). Only the daemon holds the
 -- Bluetooth link, so it runs these on its next tick (alarm.py). status: pending, done,
 -- failed, expired.
@@ -196,7 +200,8 @@ def upsert(c, table, row: dict):
     cols = ",".join(row); ph = ",".join("?" * len(row))
     sets = ",".join(f"{k}=excluded.{k}" for k in row)
     pk = {"api_sleep":"id","api_recovery":"cycle_id","api_cycle":"id",
-          "api_workout":"id","ble_hr":"ts","api_profile":"key"}.get(table, "id")
+          "api_workout":"id","ble_hr":"ts","api_profile":"key",
+          "garmin_metric":"date"}.get(table, "id")
     c.execute(f"INSERT INTO {table}({cols}) VALUES({ph}) "
               f"ON CONFLICT({pk}) DO UPDATE SET {sets}", list(row.values()))
 

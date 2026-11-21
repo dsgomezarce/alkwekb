@@ -4,9 +4,9 @@
 The front end lives in static/ (index.html, app.css, app.js, vendored Chart.js) and
 works fully offline. This file only serves it plus two JSON endpoints.
 """
-import json, time, os, sys, subprocess, threading
+import contextlib, json, re, time, os, sys, threading
 from flask import Flask, jsonify, request, send_from_directory
-import alerts, db, learn, metrics, scores, sleep, stress
+import alerts, db, garmin_api, learn, metrics, scores, sleep, stress
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
@@ -139,6 +139,8 @@ def summary():
         "cycle": rows(c, "SELECT start,end,strain,avg_hr,max_hr,kilojoule,source FROM api_cycle "
                          "WHERE strain IS NOT NULL OR source = 'garmin' ORDER BY start DESC LIMIT ?", HISTORY),
         "workout": workouts,
+        "metrics": rows(c, "SELECT date, at, weight_kg, vo2_run, vo2_cycle, source FROM garmin_metric "
+                           "ORDER BY date DESC LIMIT ?", HISTORY) if _has(c, "garmin_metric") else [],
         # strap estimates of the same scores (scores.py), only the ones that passed their checks
         "estimates": scores.for_app(c),
         # stress monitor (stress.py): today's 5-minute series, the reading now, the baseline used
@@ -186,22 +188,48 @@ SYNC = {"running": False, "started": None, "finished": None, "ok": None, "log": 
 _sync_lock = threading.Lock()
 
 
-def _run_sync():
-    env = dict(os.environ, WHOOP_DB=db.DB_PATH, PYTHONUNBUFFERED="1")
-    try:
-        p = subprocess.Popen(sync_argv(), cwd=WHOOP_HOME, env=env,
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        for line in p.stdout:
+class _SyncLog:
+    """Collect print() lines from garmin_api.sync into the status the board polls."""
+
+    def write(self, text):
+        for line in str(text).splitlines():
             line = line.strip()
             if line:
                 SYNC["log"] = (SYNC["log"] + [line])[-40:]
-        SYNC["ok"] = p.wait(timeout=600) == 0
+
+    def flush(self):
+        return None
+
+
+def _run_sync():
+    """Same function as `python garmin_api.py sync`: 429/500 retry, then 28-day spans."""
+    try:
+        with contextlib.redirect_stdout(_SyncLog()):
+            garmin_api.sync()
+        SYNC["ok"] = True
     except Exception as ex:  # noqa: BLE001 - surface anything to the UI
-        SYNC["log"] = SYNC["log"] + [f"error: {ex}"]
+        SYNC["log"] = (SYNC["log"] + [f"error: {ex}"])[-40:]
         SYNC["ok"] = False
     finally:
         SYNC["running"] = False
         SYNC["finished"] = time.time()
+
+
+_SYNC_STOP = re.compile(r"failed \(|dailysummaries failed", re.I)
+
+
+def sync_payload():
+    """Status for the board. A daily-summary 500 is a retry, not a stopped sync."""
+    log = []
+    for line in list(SYNC["log"]):
+        if _SYNC_STOP.search(line):
+            line = (f"Daily summaries returned an error. Continuing in "
+                    f"{garmin_api.DAILY_SPAN}-day spans.")
+        if log and log[-1] == line:
+            continue
+        log.append(line)
+    return {"running": SYNC["running"], "started": SYNC["started"],
+            "finished": SYNC["finished"], "ok": SYNC["ok"], "log": log[-40:]}
 
 
 @app.route("/api/sync", methods=["GET", "POST"])
@@ -214,10 +242,10 @@ def resync():
             return jsonify({"error": "Demo database: syncing is disabled so real data never lands in it."}), 409
         with _sync_lock:
             if SYNC["running"]:
-                return jsonify(SYNC), 409
+                return jsonify(sync_payload()), 409
             SYNC.update(running=True, started=time.time(), finished=None, ok=None, log=[])
         threading.Thread(target=_run_sync, daemon=True).start()
-    return jsonify(SYNC)
+    return jsonify(sync_payload())
 
 
 @app.route("/api/feel", methods=["POST"])

@@ -3,7 +3,7 @@
 
 Run:  python -m unittest test_garmin -v
 """
-import base64, json, os, sqlite3, stat, sys, tempfile, unittest
+import base64, contextlib, io, json, os, sqlite3, stat, sys, tempfile, unittest
 
 _TMP = tempfile.mkdtemp(prefix="garmin-feed-test-")
 os.environ["WHOOP_DB"] = os.path.join(_TMP, "test.db")
@@ -115,6 +115,16 @@ def fixture_routes():
             "calendarDate": DAY, "wellnessActivityType": "HEALTH_MONITORING",
             "deviceMetaData": {"deviceId": 1, "deviceName": "Forerunner 965"},
         }],
+        f"{garmin_api.WEIGHT_PATH}/{DAY}/{DAY}": {
+            "dailyWeightSummaries": [{
+                "summaryDate": DAY,
+                "latestWeight": {"calendarDate": DAY, "weight": 82.4},
+            }],
+        },
+        f"{garmin_api.VO2_PATH}/{DAY}/{DAY}": [{
+            "generic": {"calendarDate": DAY, "vo2MaxPreciseValue": 52.4, "vo2MaxValue": 52},
+            "cycling": {"calendarDate": DAY, "vo2MaxPreciseValue": 58.1, "vo2MaxValue": 58},
+        }],
     }
 
 
@@ -122,7 +132,7 @@ class GarminMapTest(unittest.TestCase):
     def setUp(self):
         self.c = db.connect()
         for table in ("api_sleep", "api_recovery", "api_cycle", "api_workout", "ble_hr",
-                      "api_profile", "sync_state"):
+                      "api_profile", "sync_state", "garmin_metric"):
             self.c.execute(f"DELETE FROM {table}")
         self.c.commit()
         self.token = os.path.join(_TMP, ".garmin_token.json")
@@ -236,8 +246,11 @@ class GarminMapTest(unittest.TestCase):
         page = dashboard.app.test_client().get("/").get_data(as_text=True)
         self.assertIn('title="dsgomezarce"', page)
         self.assertIn(">dsgomezarce</span>", page)
-        self.assertEqual(page.count("data-mark-choice="), 3)
-        self.assertIn('data-mark-choice="pulse"', page)
+        self.assertNotIn("data-mark-choice", page)
+        self.assertNotIn("mark-pick", page)
+        self.assertNotIn("Heart with a sharp trace", page)
+        self.assertNotIn("Heart with a double beat", page)
+        self.assertEqual(page.count("M16 9.4c-.8-1.8-2.5-3.4"), 1)
         self.assertNotIn(">A</span>", page)
         self.assertNotIn("WHOOP", page)
         self.assertNotIn("smiley.png", page)
@@ -247,6 +260,50 @@ class GarminMapTest(unittest.TestCase):
         self.assertIn(">garmin.db</code>", page)
         self.assertNotIn("whoop.db", page)
         self.assertEqual(body["profile"]["garmin_device"], "Forerunner 965")
+
+    def test_weight_and_vo2_use_the_published_fields(self):
+        weights = garmin_api.weight_by_day({
+            "dailyWeightSummaries": [{
+                "summaryDate": DAY,
+                "latestWeight": {"calendarDate": DAY, "weight": 82.4},
+            }],
+        })
+        self.assertEqual(weights, {DAY: 82.4})
+        vo2 = garmin_api.vo2_by_day([{
+            "generic": {"calendarDate": DAY, "vo2MaxPreciseValue": 52.4, "vo2MaxValue": 52},
+            "cycling": {"calendarDate": DAY, "vo2MaxValue": 58},
+            "rowing": {"calendarDate": DAY, "vo2MaxPreciseValue": 40},
+        }])
+        self.assertEqual(vo2[DAY], {"vo2_run": 52.4, "vo2_cycle": 58})
+
+        counts, _, _ = garmin_api.Sync(self.client, self.c, today=DAY).run(days=1)
+        self.assertEqual(counts["metrics"], 1)
+        row = self.c.execute("SELECT * FROM garmin_metric WHERE date=?", (DAY,)).fetchone()
+        self.assertEqual(row["weight_kg"], 82.4)
+        self.assertEqual(row["vo2_run"], 52.4)
+        self.assertEqual(row["vo2_cycle"], 58.1)
+        self.assertEqual(row["source"], "garmin")
+        gets = [c for c in self.session.calls if c[0] == "GET"]
+        weight = next(c for c in gets if garmin_api.WEIGHT_PATH in c[1])
+        self.assertEqual(weight[2]["includeAll"], "true")
+        vo = next(c for c in gets if garmin_api.VO2_PATH in c[1])
+        self.assertEqual(vo[2]["sport"], ["RUNNING", "CYCLING"])
+        body = dashboard.app.test_client().get("/api/summary").get_json()
+        self.assertEqual(body["metrics"][0]["weight_kg"], 82.4)
+        self.assertEqual(body["metrics"][0]["vo2_run"], 52.4)
+        self.assertEqual(body["metrics"][0]["vo2_cycle"], 58.1)
+        static = os.path.join(os.path.dirname(dashboard.__file__), "static")
+        with open(os.path.join(static, "app.js"), encoding="utf-8") as fh:
+            js = fh.read()
+        with open(os.path.join(static, "index.html"), encoding="utf-8") as fh:
+            html = fh.read()
+        shown = js + html
+        self.assertIn('label: "Weight"', js)
+        self.assertIn('label: "Running VO2 Max"', js)
+        self.assertIn('label: "Cycling VO2 Max"', js)
+        for absent in ("Training readiness", "Training status", "Estado de Entreno",
+                       "Predisposición"):
+            self.assertNotIn(absent, shown)
 
     def test_device_name_is_the_latest_wellness_watch(self):
         name = garmin_api.device_name([
@@ -329,12 +386,16 @@ class GarminMapTest(unittest.TestCase):
             token_path=self.token, now=lambda: 1_700_000_000, sleep=lambda s: sleeps.append(s))
         span = garmin_api.DAILY_SPAN
         garmin_api.DAILY_SPAN = 1
+        notes = io.StringIO()
         try:
-            counts, start, _ = garmin_api.Sync(client, self.c, today=DAY).run(days=2)
+            with contextlib.redirect_stdout(notes):
+                counts, start, _ = garmin_api.Sync(client, self.c, today=DAY).run(days=2)
         finally:
             garmin_api.DAILY_SPAN = span
         # The year-long call is retried, then each smaller span is retried too.
         self.assertEqual(sleeps, list(garmin_api.RETRY_WAITS) * 3)
+        self.assertNotIn("dailysummaries failed", notes.getvalue())
+        self.assertIn("continuing in 1-day spans", notes.getvalue())
         self.assertEqual(counts["skipped"], 2)
         self.assertEqual(counts["heart"], 2)
         self.assertEqual(start, "2026-11-18")
@@ -353,6 +414,37 @@ class GarminMapTest(unittest.TestCase):
             "SELECT resting_hr FROM api_recovery WHERE cycle_id=?", (-20261119,)).fetchone()
         self.assertEqual(resting["resting_hr"], 48)
         self.assertEqual(sleeps, [])
+
+    def test_dashboard_sync_retries_and_does_not_show_a_fatal_stop(self):
+        seen = {}
+
+        def fake_sync(days=None, client=None, conn=None, today=None):
+            seen["days"] = days
+            print("daily summaries: GET /usersummary-service/v2/dailysummaries failed (500).")
+            print("heart 2026-11-19: stored")
+            return {"heart": 1}
+
+        original = garmin_api.sync
+        garmin_api.sync = fake_sync
+        dashboard.SYNC.update(running=True, started=None, finished=None, ok=None, log=[])
+        try:
+            dashboard._run_sync()
+        finally:
+            garmin_api.sync = original
+        self.assertIsNone(seen["days"])
+        self.assertTrue(dashboard.SYNC["ok"])
+        self.assertFalse(dashboard.SYNC["running"])
+        body = dashboard.sync_payload()
+        text = "\n".join(body["log"])
+        self.assertNotIn("dailysummaries failed", text)
+        self.assertNotIn("failed (", text)
+        self.assertIn(f"Continuing in {garmin_api.DAILY_SPAN}-day spans", text)
+        self.assertIn("heart 2026-11-19: stored", text)
+        static = os.path.join(os.path.dirname(dashboard.__file__), "static", "app.js")
+        with open(static, encoding="utf-8") as fh:
+            js = fh.read()
+        self.assertIn("function syncLine", js)
+        self.assertIn("Days that did not return will fill", js)
 
     def test_whoop_db_is_copied_into_garmin_db_and_kept(self):
         folder = tempfile.mkdtemp(prefix="garmin-db-")

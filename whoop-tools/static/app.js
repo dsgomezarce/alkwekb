@@ -314,17 +314,6 @@
     if (worn) $("#side-device").textContent = worn;
   }
 
-  function applyMark(id) {
-    const buttons = [...document.querySelectorAll("[data-mark-choice]")];
-    const pick = buttons.find((b) => b.dataset.markChoice === id) || buttons.find((b) => b.dataset.markChoice === "pulse");
-    if (!pick) return;
-    buttons.forEach((b) => b.setAttribute("aria-checked", b === pick ? "true" : "false"));
-    const mark = document.getElementById("brand-mark");
-    const svg = pick.querySelector("svg");
-    if (mark && svg) mark.replaceChildren(svg.cloneNode(true));
-    try { localStorage.setItem("vitals-mark", pick.dataset.markChoice); } catch { /* private mode */ }
-  }
-
   /* ───────── Reference range (lab-report style) ───────── */
   // Track = min..max of the last 30 readings; band = usual range (mean ± 1 SD); dot = latest.
   function refBar(series, latest, colorVar, d = 0) {
@@ -402,14 +391,18 @@
     { key: "spo2", src: "recovery", label: "Blood oxygen", unit: "%", d: 1, color: "--m-spo2" },
     { key: "skin_temp_c", src: "recovery", label: "Skin temperature", unit: "°C", d: 1, color: "--m-temp" },
     { key: "resp_rate", src: "sleep", label: "Respiratory rate", unit: "rpm", d: 1, color: "--m-resp" },
+    { key: "weight_kg", src: "metrics", when: "at", label: "Weight", unit: "kg", d: 1, color: "--m-strain" },
+    { key: "vo2_run", src: "metrics", when: "at", label: "Running VO2 Max", unit: "ml/kg/min", d: 1, color: "--m-hrv" },
+    { key: "vo2_cycle", src: "metrics", when: "at", label: "Cycling VO2 Max", unit: "ml/kg/min", d: 1, color: "--m-resp" },
   ];
   function renderVitals(d) {
     const host = $("#vitals");
     host.innerHTML = "";
     for (const m of VITALS) {
-      const rows = d[m.src].slice().reverse();
+      const when = m.when || (m.src === "sleep" ? "end" : "created_at");
+      const rows = (d[m.src] || []).slice().reverse();
       const series = rows.map((r) => r[m.key]);
-      const latest = ofDay(rows.at(-1), m.src === "sleep" ? "end" : "created_at") ? series.at(-1) : null;
+      const latest = ofDay(rows.at(-1), when) ? series.at(-1) : null;
       const b = baseline(series);
       const card = el("article", "card vital");
       const id = `spark-${m.key}`;
@@ -443,7 +436,7 @@
       opts.scales.y.display = false;
       opts.layout.padding = { top: 6, bottom: 2, left: 4, right: 6 };
       opts.plugins.tooltip.callbacks = {
-        title: (i) => dShort.format(+day(last30[i[0].dataIndex][m.src === "sleep" ? "end" : "created_at"])),
+        title: (i) => dShort.format(+day(last30[i[0].dataIndex][when])),
         label: (i) => ` ${fmt(i.parsed.y, m.d)} ${m.unit}`,
       };
       opts.plugins.tooltip.displayColors = false;
@@ -890,6 +883,7 @@
   function V() {
     if (!DATA) return DATA;
     let recovery = DATA.recovery, sleep = DATA.sleep, cycle = DATA.cycle, workout = DATA.workout;
+    let metrics = DATA.metrics || [];
     if (ADATE) {
       const end = +fromYmd(ADATE) + DAY;
       const le = (k) => (r) => +day(r[k]) < end;
@@ -897,9 +891,11 @@
       sleep = sleep.filter(le("end"));
       cycle = cycle.filter(le("start"));
       workout = workout.filter(le("start"));
+      metrics = metrics.filter(le("at"));
     }
     return { ...DATA, recovery: recovery.filter(onFeed), sleep: sleep.filter(onFeed),
-      cycle: cycle.filter(onFeed), workout: workout.filter(onFeed) };
+      cycle: cycle.filter(onFeed), workout: workout.filter(onFeed),
+      metrics: metrics.filter(onFeed) };
   }
   function setPeriod(p) {
     if (p === "archive" && !ADATE) return;
@@ -1198,19 +1194,27 @@
     });
     document.querySelectorAll("[data-sync-msg]").forEach((m) => { m.textContent = msg || ""; m.dataset.tone = tone || ""; });
   }
+  function syncLine(log) {
+    const lines = (log || []).filter((line) => !/failed \(|dailysummaries failed/i.test(line));
+    const last = lines.at(-1) || "Syncing…";
+    return last.length > 80 ? last.slice(0, 80) + "…" : last;
+  }
   async function pollSync(before) {
     const s = await (await fetch("/api/sync", { cache: "no-store" })).json();
     if (s.running) {
-      const last = s.log.at(-1) || "Starting…";
-      setSyncUI("running", last.length > 64 ? last.slice(0, 64) + "…" : last);
+      setSyncUI("running", syncLine(s.log));
       return setTimeout(() => pollSync(before), 1500);
     }
     await load();
     const after = DATA?.recovery[0]?.created_at;
     const fresh = after && after !== before;
-    setSyncUI("idle",
-      s.ok === false ? "Garmin sync did not finish. Run it again to fill any skipped days." : "Garmin sync finished.",
-      s.ok === false ? "warn" : fresh ? "ok" : "ok");
+    const retrying = (s.log || []).some((line) => /saved to retry|Continuing in/.test(line));
+    const done = s.ok === false
+      ? "Garmin sync did not finish. Run it again to fill any skipped days."
+      : retrying
+        ? "Garmin sync finished. Days that did not return will fill on the next sync."
+        : "Garmin sync finished.";
+    setSyncUI("idle", done, s.ok === false ? "warn" : fresh ? "ok" : "ok");
   }
   async function startSync() {
     const before = DATA?.recovery[0]?.created_at;
@@ -1259,7 +1263,12 @@
       REC_BY_DAY = new Map();
       const fedRec = DATA.recovery.filter(onFeed);
       for (const x of fedRec.slice().reverse()) REC_BY_DAY.set(ymd(+day(x.created_at)), x);
-      DAYS = new Set([...REC_BY_DAY.keys(), ...DATA.sleep.filter(onFeed).map((x) => ymd(+day(x.end))), ...DATA.cycle.filter(onFeed).map((x) => ymd(+day(x.start)))]);
+      DAYS = new Set([
+        ...REC_BY_DAY.keys(),
+        ...DATA.sleep.filter(onFeed).map((x) => ymd(+day(x.end))),
+        ...DATA.cycle.filter(onFeed).map((x) => ymd(+day(x.start))),
+        ...(DATA.metrics || []).filter(onFeed).map((x) => x.date || ymd(+day(x.at))),
+      ]);
       if (!ADATE || !DAYS.has(ADATE)) ADATE = [...DAYS].sort().at(-1) ?? null;
       main.setAttribute("aria-busy", "false");
       renderAll();
@@ -1276,12 +1285,7 @@
   $("#retry").addEventListener("click", load);
 
   window.addEventListener("DOMContentLoaded", () => {
-    let saved = "pulse";
-    try { saved = localStorage.getItem("vitals-mark") || "pulse"; } catch { /* private mode */ }
-    applyMark(saved);
-    document.querySelectorAll("[data-mark-choice]").forEach((b) => {
-      b.addEventListener("click", () => applyMark(b.dataset.markChoice));
-    });
+    try { localStorage.removeItem("vitals-mark"); } catch { /* private mode */ }
     Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
     load();
     pollLive();
