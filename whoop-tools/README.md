@@ -35,8 +35,7 @@ python garmin_api.py sync --days 30 # a longer backfill
 python dashboard.py                 # http://localhost:8787
 ```
 
-The dashboard **Sync Garmin** button runs `garmin_api.py sync`. It does not drain a strap.
-WHOOP BLE (`whoop.py`, `daemon.py`, `collector.py`) is unchanged.
+The dashboard is Garmin only. **Sync Garmin** runs `garmin_api.py sync`. It does not connect a strap, and the board does not show a strap alarm. A request that comes back 429 is retried with backoff. A day that still fails is stored and filled in on the next sync. Heart samples already in the database are kept (`heart_kept`) instead of inserted again.
 
 From the strap's data it also computes sleep, Strain, Sleep and Recovery estimates, breathing
 rate, energy, stress and health alerts (sections below).
@@ -59,9 +58,7 @@ cp .env.example .env            # then paste your Client ID + Secret into .env
 WHOOP_DB=data/whoop-demo.db .venv/bin/python dashboard.py  # http://localhost:8787
 .venv/bin/python seed_demo.py --stream                     # optional: fake a live strap (HR/RR every second)
 ```
-The app opens on the full-screen **Heart** view. **Today** shows only strap data recorded
-today; **Archive** holds the WHOOP cloud history behind a calendar. **Resync** (sidebar,
-Today, Heart toolbar) runs one collector cycle. Set `WHOOP_HOME` if `.env`/`.tokens.json`
+The app opens on the full-screen **Heart** view. **Today** and **Archive** show Garmin Connect. **Sync Garmin** (sidebar, Today, Heart toolbar) runs `garmin_api.py sync`. Set `WHOOP_HOME` if `.env`/`.tokens.json`
 live in a different folder from the dashboard.
 The real pipeline creates your own `whoop.db` (gitignored). Never commit a real `whoop.db`
 or its exports — `.gitignore` blocks `*.db`, `data/`, `.env`, `.tokens.json`, `.backup_key`.
@@ -343,8 +340,7 @@ python whoop.py alarm 07:00       # every day; 'python whoop.py alarm 07:00 once
 python whoop.py alarm show        # the time, and whether it is on the strap yet
 python whoop.py alarm off
 ```
-The Today page of the local dashboard has the same controls (`/api/alarm`, `/api/buzz`).
-They are hidden in the phone (Cloudflare) copy, which cannot reach the strap.
+The Garmin board does not call `/api/alarm` or `/api/buzz`. Those routes are not on the dashboard, so opening it does not import the strap stack.
 
 How it works: the alarm time is stored in `sync_state` (`alarm`). Only one program can hold the
 Bluetooth link, so the CLI and the dashboard add a row to `strap_cmd`, and the daemon runs it

@@ -9,7 +9,7 @@ const SESSION_DAYS = 90;
 const HISTORY = 400;
 const PUBLIC = new Set([
   "/static/manifest.webmanifest", "/static/icon-192.png", "/static/icon-512.png", "/static/icon-180.png", "/static/favicon.png", "/favicon.ico",
-  "/static/smiley.png", "/static/inter-400.woff2", "/static/inter-500.woff2", // the sign-in page uses these
+  "/static/mark.svg", "/static/inter-400.woff2", "/static/inter-500.woff2", // the sign-in page uses these
 ]);
 const enc = new TextEncoder();
 
@@ -62,7 +62,7 @@ const SHELL = (title, body, script = "") => `<!doctype html><html lang="en"><hea
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Vitals">
 <meta name="color-scheme" content="dark light">
 <link rel="manifest" href="/static/manifest.webmanifest"><link rel="apple-touch-icon" href="/static/icon-180.png">
-<link rel="icon" type="image/png" href="/static/favicon.png">
+<link rel="icon" href="/static/mark.svg" type="image/svg+xml">
 <link rel="preload" href="/static/inter-400.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/inter-500.woff2" as="font" type="font/woff2" crossorigin>
 <title>${title}</title>
@@ -78,7 +78,7 @@ body{margin:0;min-height:100dvh;display:flex;flex-direction:column;align-items:c
 h1,p{margin:0}
 .card{width:100%;max-width:360px;padding:32px 24px 24px;border:1px solid var(--border);border-radius:12px;background:var(--surface)}
 .brand{display:flex;flex-direction:column;align-items:flex-start;gap:16px;margin-bottom:24px}
-.brand img{width:40px;height:40px;display:block}
+.mark{width:40px;height:40px;display:grid;place-items:center;border:1px solid var(--border-strong);border-radius:10px;font-weight:500}
 h1{font-size:1.25rem;font-weight:500;letter-spacing:-0.012em}
 .lede{margin-top:4px;color:var(--text-2)}
 label{display:block;margin-bottom:6px;font-size:0.8125rem;font-weight:500;color:var(--text-2)}
@@ -108,7 +108,7 @@ ${script ? `<script>${CLIENT_HELPERS}${script}</script>` : ""}
 </body></html>`;
 
 const KEY_ICON = `<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="6.5" cy="10" r="3.5"/><path d="M10 10h7.5M14.5 10v2.5M17 10v2"/></svg>`;
-const BRAND = (title, lede) => `<div class="brand"><img src="/static/smiley.png" alt="" width="40" height="40"><div><h1>${title}</h1><p class="lede">${lede}</p></div></div>`;
+const BRAND = (title, lede) => `<div class="brand"><span class="mark" title="dsgomezarce">A</span><div><h1>${title}</h1><p class="lede">${lede}</p></div></div>`;
 
 // Runs in the browser: base64url <-> bytes, and JSON POST.
 const CLIENT_HELPERS = `
@@ -120,7 +120,7 @@ var mark=function(){try{localStorage.setItem("vitals-passkey","1")}catch(e){}};
 `;
 
 const LOGIN = (error, hasPasskeys) => SHELL("Vitals · Sign in", `<main class="card">
-${BRAND("Vitals", "Your heart, recovery and sleep, synced from your strap.")}
+${BRAND("Vitals", "Heart rate, sleep, and activity from Garmin Connect.")}
 <div id="pk" ${hasPasskeys ? "" : "hidden"}>
 <button class="btn btn--primary" type="button" id="pk-btn">${KEY_ICON}Sign in with a passkey</button>
 <div class="or">or use your password</div>

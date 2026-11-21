@@ -10,10 +10,9 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Vitals">
 <link rel="manifest" href="/static/manifest.webmanifest">
-<link rel="apple-touch-icon" href="/static/icon-180.png">
 <meta name="color-scheme" content="dark light">
-<title>Vitals · WHOOP local</title>
-<link rel="icon" type="image/png" href="/static/favicon.png">
+<title>Vitals</title>
+<link rel="icon" href="/static/mark.svg" type="image/svg+xml">
 <script>
   // Apply the saved theme before first paint so there is no flash.
   (function () {
@@ -38,8 +37,8 @@
 <div class="shell">
   <!-- ───────── Sidebar ───────── -->
   <aside class="side" aria-label="App">
-    <a class="brand" href="#heart" aria-label="Vitals, back to overview">
-      <img class="brand__mark" src="/static/smiley.png" alt="" width="28" height="28">
+    <a class="brand" href="#heart" title="dsgomezarce" aria-label="dsgomezarce">
+      <span class="brand__mark" aria-hidden="true">A</span>
       <span class="brand__text"><span class="brand__name">Vitals</span><span class="brand__tag">Local</span></span>
     </a>
     <div class="period side__period" role="group" aria-label="Time period">
@@ -58,7 +57,7 @@
       <span class="patient__avatar" id="avatar" aria-hidden="true">·</span>
       <div class="patient__meta">
         <p class="patient__name" id="patient-name">Loading…</p>
-        <p class="patient__device"><span class="dot" id="side-dot" data-state="off" aria-hidden="true"></span><span id="side-device">WHOOP 4.0</span></p>
+        <p class="patient__device"><span class="dot" id="side-dot" data-state="off" aria-hidden="true"></span><span id="side-device">Garmin</span></p>
         <p class="patient__kept" id="side-kept"></p>
       </div>
     </div>
@@ -78,9 +77,9 @@
 
     <div class="side__foot">
       <div class="sidecard">
-        <div class="sidecard__row"><span id="side-ble-label">Strap</span><span id="side-ble">—</span></div>
+        <div class="sidecard__row"><span id="side-ble-label">Garmin</span><span id="side-ble">—</span></div>
         <div class="sidecard__row"><span>Archive</span><span id="side-api">—</span></div>
-        <div class="sidecard__row"><span>Strap battery</span><span id="side-bat">—</span></div>
+        <div class="sidecard__row"><span>Source</span><span id="side-bat">Garmin</span></div>
         <button class="resync" type="button" data-resync><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 10a6.5 6.5 0 0 1-11.6 4M3.5 10a6.5 6.5 0 0 1 11.6-4"/><path d="M15.5 2.8v3.4h-3.4M4.5 17.2v-3.4h3.4"/></svg><span data-resync-label>Sync Garmin</span></button>
         <p class="sync-msg" data-sync-msg aria-live="polite"></p>
       </div>
@@ -180,7 +179,7 @@
         <div class="section__head">
           <div>
             <h2 id="today-h" class="title">Today</h2>
-            <p class="section__meta" id="today-meta">Straight from your strap</p>
+            <p class="section__meta" id="today-meta">From Garmin Connect</p>
           </div>
           <button class="btn btn--primary" type="button" data-resync><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 10a6.5 6.5 0 0 1-11.6 4M3.5 10a6.5 6.5 0 0 1 11.6-4"/><path d="M15.5 2.8v3.4h-3.4M4.5 17.2v-3.4h3.4"/></svg><span data-resync-label>Sync Garmin</span></button>
         </div>
@@ -189,7 +188,7 @@
             <div class="monitor">
               <header class="monitor__head">
                 <h3 id="live-h" class="monitor__title">Heart rate</h3>
-                <span class="monitor__src">Strap · BLE</span>
+                <span class="monitor__src">Garmin</span>
                 <span class="pill" id="live-pill" data-state="off"><span class="pill__dot" aria-hidden="true"></span><span id="live-pill-text">Offline</span></span>
               </header>
               <div class="monitor__body">
@@ -198,7 +197,7 @@
                     <span class="bpm__num" id="live-hr">—</span><span class="bpm__unit">bpm</span>
                     <span class="bpm__limits" aria-label="Display limits 40 to 180 bpm"><span>180</span><span>40</span></span>
                   </div>
-                  <p class="monitor__note" id="live-note">Waiting for the strap</p>
+                  <p class="monitor__note" id="live-note">Sync Garmin for a reading</p>
                   <dl class="mstats" id="live-stats">
                     <div><dt>RR</dt><dd id="live-rr">—</dd></div>
                     <div><dt>Min / Max</dt><dd id="live-range">—</dd></div>
@@ -261,22 +260,6 @@
             <div class="chart chart--sm"><canvas id="c-stress" role="img"></canvas></div>
             <p class="fine"><span id="stress-base"></span> Heart rate up and HRV down while you sit still, next to your own calm, on a 0–3 scale. Only scored while you're still and awake. Standing up, talking, coffee and stress all read the same here: it shows how activated you are, not why. Not a medical device.</p>
           </article>
-          <!-- Silent alarm: only on the local dashboard (needs the strap service); hidden elsewhere -->
-          <article class="card span-12" aria-labelledby="alarm-h" id="alarm-card" hidden>
-            <header class="card__head">
-              <div>
-                <h3 id="alarm-h" class="card__title">Silent alarm</h3>
-                <p class="card__stat" id="alarm-status" aria-live="polite"></p>
-              </div>
-            </header>
-            <form class="alarm" id="alarm-form">
-              <label class="alarm__field"><span>Wake at</span><input type="time" id="alarm-time" required value="07:00"></label>
-              <label class="alarm__check"><input type="checkbox" id="alarm-daily" checked> Every day</label>
-              <button class="btn btn--primary" type="submit">Set alarm</button>
-              <button class="btn" type="button" id="alarm-off">Turn off</button>
-              <button class="btn btn--ghost" type="button" id="alarm-buzz">Test buzz</button>
-            </form>
-          </article>
         </div>
       </section>
 
@@ -284,7 +267,7 @@
         <span class="notice__icon" aria-hidden="true"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="2.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg></span>
         <div class="notice__body">
           <p class="notice__title" id="arch-title">Archive</p>
-          <p class="notice__text" id="arch-text">WHOOP history. Nothing on this page is from today.</p>
+          <p class="notice__text" id="arch-text">Garmin history. Nothing on this page is from today.</p>
         </div>
         <button class="btn" type="button" data-cal><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="2.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg>Change date</button>
         <a class="btn btn--primary" href="#today">Back to today</a>
@@ -295,7 +278,7 @@
         <div class="section__head">
           <div>
             <h2 id="overview-h" class="title" data-archive-day>Day</h2>
-            <p class="section__meta">WHOOP's scores, or strap estimates where marked</p>
+            <p class="section__meta">From Garmin Connect</p>
           </div>
         </div>
         <div class="grid">
@@ -408,7 +391,7 @@
         <div class="section__head">
           <div>
             <h2 id="sleep-h" class="title">Sleep</h2>
-            <p class="section__meta">Stages scored by WHOOP; strap nights show asleep and awake only</p>
+            <p class="section__meta">Stages from Garmin Connect</p>
           </div>
         </div>
         <div class="grid">
@@ -449,10 +432,10 @@
           <article class="card span-7" aria-labelledby="st-h">
             <header class="card__head">
               <div>
-                <h3 id="st-h" class="card__title">Day strain</h3>
+                <h3 id="st-h" class="card__title">Active calories</h3>
                 <p class="card__stat" id="st-stat"></p>
               </div>
-              <span class="card__hint">Scale 0–21</span>
+              <span class="card__hint">From Garmin</span>
             </header>
             <div class="chart chart--md"><canvas id="c-strain" role="img"></canvas></div>
           </article>
@@ -497,7 +480,7 @@
         <div class="section__head">
           <div>
             <h2 id="device-h" class="title">Device</h2>
-            <p class="section__meta">Decoded directly from the strap over Bluetooth</p>
+            <p class="section__meta">Garmin Connect on this Mac</p>
           </div>
           <p class="card__hint" id="device-state"><span class="dot" data-state="off" aria-hidden="true"></span><span id="device-state-text">Not connected</span></p>
         </div>
@@ -506,7 +489,7 @@
             <article class="card" aria-labelledby="bat-h">
               <header class="card__head">
                 <h3 id="bat-h" class="card__title">Battery</h3>
-                <span class="card__hint">Asked from the strap</span>
+                <span class="card__hint">Not reported by Garmin</span>
               </header>
               <div class="battery" id="battery"></div>
             </article>
@@ -538,7 +521,7 @@
     </main>
 
     <footer class="footer">
-      <p>Personal tracking tool built on a reverse-engineered strap protocol and the WHOOP API. Not a medical device; don't use it for clinical decisions.</p>
+      <p>Personal tracking tool fed by Garmin Connect. Not a medical device; don't use it for clinical decisions.</p>
       <p>Vitals · local build</p>
     </footer>
   </div>

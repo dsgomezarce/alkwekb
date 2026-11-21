@@ -44,6 +44,12 @@ OVERLAP_DAYS = 2
 MAX_DAYS = 366
 ACTIVITY_PAGE = 100
 KCAL_TO_KJ = 4.184
+# Honor Retry-After when Garmin sends one; otherwise wait 1, 2, 4, 8, 16 seconds.
+RETRY_WAITS = (1, 2, 4, 8, 16)
+MAX_RETRY_AFTER = 60
+RETRY_KEY = "garmin_retry"
+# A short pause between days so a 90-day pull does not immediately trip the limit.
+DAY_PACE = 0.2
 
 
 class GarminError(RuntimeError):
@@ -84,18 +90,47 @@ def _fingerprint(base, key):
     return hashlib.sha256(f"{base}\0{key}".encode()).hexdigest()
 
 
+def _retry_after(response):
+    """Seconds to wait, from a Retry-After header. None when Garmin did not send one."""
+    headers = getattr(response, "headers", None) or {}
+    raw = headers.get("Retry-After") if hasattr(headers, "get") else None
+    if raw is None or raw == "":
+        return None
+    try:
+        return min(MAX_RETRY_AFTER, max(0.0, float(raw)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _shift_day(day, delta):
+    t = calendar.timegm(time.strptime(day, "%Y-%m-%d")) + delta * 86400
+    return time.strftime("%Y-%m-%d", time.gmtime(t))
+
+
+def _load_retry(c):
+    raw = db.get_state(c, RETRY_KEY)
+    if not raw:
+        return []
+    try:
+        days = json.loads(raw)
+    except ValueError:
+        return []
+    return sorted({d for d in days if isinstance(d, str) and len(d) == 10})
+
+
 class GarminClient:
     """Bearer-token client for https://personal.connectapi.garmin.com.
 
     `session` is a requests-like object (post/get) so tests can stand in for the network.
     """
 
-    def __init__(self, api_key, base=BASE, session=None, token_path=None, now=None):
+    def __init__(self, api_key, base=BASE, session=None, token_path=None, now=None, sleep=None):
         self.api_key = api_key
         self.base = base.rstrip("/")
         self.session = session or requests.Session()
         self.token_path = token_path or token_file()
         self.now = now or time.time
+        self.sleep = sleep or time.sleep
         self._token = None
         self._exp = 0
 
@@ -130,9 +165,14 @@ class GarminClient:
             response = self._get(url, token, params)
         if response.status_code == 404 or response.status_code == 204:
             return None
-        if response.status_code == 429:
-            time.sleep(5)
+        attempt = 0
+        while response.status_code == 429 and attempt < len(RETRY_WAITS):
+            wait = _retry_after(response)
+            if wait is None:
+                wait = RETRY_WAITS[attempt]
+            self.sleep(wait)
             response = self._get(url, token, params)
+            attempt += 1
         if response.status_code >= 400:
             raise GarminError(f"GET {path} failed ({response.status_code}).")
         text = (response.text or "").strip()
@@ -150,7 +190,8 @@ class GarminClient:
 
     def _read_cache(self, fp):
         try:
-            cache = json.load(open(self.token_path))
+            with open(self.token_path) as fh:
+                cache = json.load(fh)
         except (OSError, ValueError):
             return None
         if cache.get("fingerprint") != fp:
@@ -284,7 +325,8 @@ def hr_samples(payload):
             continue
         if ts_n > 10_000_000_000:
             ts_n /= 1000.0
-        out.append((ts_n, int(hr_n)))
+        # Milliseconds, so the same sample hits the same REAL primary key next sync.
+        out.append((round(ts_n, 3), int(hr_n)))
     return out
 
 
@@ -310,12 +352,24 @@ def _as_list(payload, *keys):
 
 
 def put_hr(c, ts, hr):
-    """Insert a Garmin sample. A WHOOP sample at the same timestamp is left alone."""
-    row = c.execute("SELECT source FROM ble_hr WHERE ts=?", (ts,)).fetchone()
+    """Store one Garmin sample.
+
+    Returns "new" when the row is inserted, "kept" when that timestamp was already
+    Garmin (the bpm is refreshed, the row is not duplicated), or "blocked" when a
+    non-Garmin row already owns the timestamp.
+    """
+    ts = round(float(ts), 3)
+    row = c.execute(
+        "SELECT ts, source, hr FROM ble_hr WHERE ts >= ? AND ts < ? ORDER BY ABS(ts - ?) LIMIT 1",
+        (ts - 0.0005, ts + 0.0005, ts)).fetchone()
     if row is not None and (row["source"] or "whoop") != SOURCE:
-        return False
+        return "blocked"
+    if row is not None:
+        if int(row["hr"]) != int(hr) or (row["source"] or "") != SOURCE:
+            c.execute("UPDATE ble_hr SET hr=?, source=? WHERE ts=?", (int(hr), SOURCE, row["ts"]))
+        return "kept"
     db.upsert(c, "ble_hr", {"ts": ts, "hr": int(hr), "rr_ms": "", "source": SOURCE})
-    return True
+    return "new"
 
 
 def _slim(payload):
@@ -366,14 +420,22 @@ def store_sleep(c, payload):
 
 
 def store_heart(c, payload):
-    """Returns (written, kept, samples). WHOOP timestamps are counted in kept and not overwritten."""
+    """Returns (written, kept, samples).
+
+    written is a new row. kept is a sample that was already stored, or a timestamp
+    owned by another source. Already-stored Garmin samples stay in `samples` so the
+    day's average still has them.
+    """
     written, kept, samples = 0, 0, []
     for ts, hr in hr_samples(payload):
-        if put_hr(c, ts, hr):
+        status = put_hr(c, ts, hr)
+        if status == "new":
             written += 1
             samples.append((ts, hr))
         else:
             kept += 1
+            if status == "kept":
+                samples.append((ts, hr))
     return written, kept, samples
 
 
@@ -467,10 +529,11 @@ def _spo2(dto):
 
 
 class Sync:
-    def __init__(self, client, conn, today=None):
+    def __init__(self, client, conn, today=None, pace=0):
         self.client = client
         self.c = conn
         self.today = today or time.strftime("%Y-%m-%d", time.localtime())
+        self.pace = pace
 
     def window(self, days):
         if days is None:
@@ -489,6 +552,9 @@ class Sync:
             start = time.strftime("%Y-%m-%d", time.gmtime(t))
         if start > self.today:
             start = self.today
+        retry = [d for d in _load_retry(self.c) if d <= self.today]
+        if retry:
+            start = min(start, retry[0])
         return start, self.today
 
     def run(self, days=None):
@@ -505,12 +571,13 @@ class Sync:
         except GarminError as ex:
             print("daily summaries:", ex)
         activities = self._activities(start, end)
-        counts = {"heart": 0, "heart_kept": 0, "sleep": 0, "days": 0, "workout": 0}
+        counts = {"heart": 0, "heart_kept": 0, "sleep": 0, "days": 0, "workout": 0, "skipped": 0}
         latest = None
+        failed = []
         for day in iter_days(start, end):
-            heart = self._get(HEART_PATH, {"date": day}, "heart")
-            sleep = self._get(SLEEP_PATH, {"date": day}, "sleep")
-            hrv = self._get(f"{HRV_PATH}/{day}", None, "hrv")
+            heart, heart_ok = self._get(HEART_PATH, {"date": day}, "heart")
+            sleep, sleep_ok = self._get(SLEEP_PATH, {"date": day}, "sleep")
+            hrv, hrv_ok = self._get(f"{HRV_PATH}/{day}", None, "hrv")
             written, kept, samples = store_heart(self.c, heart or {})
             counts["heart"] += written
             counts["heart_kept"] += kept
@@ -523,23 +590,43 @@ class Sync:
             hrs = [hr for _, hr in samples]
             if store_day(self.c, day, dailies.get(day), hrv_avg(hrv), _spo2(sleep_dto(sleep or {})), hrs):
                 counts["days"] += 1
+            if not (heart_ok and sleep_ok and hrv_ok):
+                failed.append(day)
+            # A later 429 must not throw away the days that already landed.
+            self.c.commit()
+            if self.pace:
+                self.client.sleep(self.pace)
         for activity in activities:
             if store_activity(self.c, activity):
                 counts["workout"] += 1
         if latest:
             db.set_state(self.c, "garmin_hr_now", json.dumps(
                 {"hr": latest[1], "ts": latest[0], "source": SOURCE}))
-        db.set_state(self.c, "garmin_since", end)
+        if failed:
+            # Leave the watermark on the hole so the next sync asks for it again.
+            db.set_state(self.c, "garmin_since", _shift_day(min(failed), -1))
+            db.set_state(self.c, RETRY_KEY, json.dumps(failed))
+            print("will retry:", ", ".join(failed))
+        else:
+            db.set_state(self.c, "garmin_since", end)
+            db.set_state(self.c, RETRY_KEY, "[]")
         db.set_state(self.c, "garmin_synced_at", str(time.time()))
+        counts["skipped"] = len(failed)
         self.c.commit()
         return counts, start, end
 
     def _get(self, path, params, label):
+        """Returns (payload, ok). ok is False when the request failed, including a 429."""
         try:
-            return self.client.get(path, params)
+            return self.client.get(path, params), True
         except GarminError as ex:
-            print(f"{label}:", ex)
-            return None
+            day = ""
+            if isinstance(params, dict) and params.get("date"):
+                day = " " + str(params["date"])
+            elif isinstance(path, str) and path.startswith(HRV_PATH + "/"):
+                day = " " + path.rsplit("/", 1)[-1]
+            print(f"{label}{day}:", ex)
+            return None, False
 
     def _activities(self, start, end):
         out = []
@@ -577,7 +664,7 @@ def sync(days=None, client=None, conn=None, today=None):
     if own_client:
         client = GarminClient(api_key(), base_url())
     c = conn or db.connect()
-    counts, start, end = Sync(client, c, today=today).run(days)
+    counts, start, end = Sync(client, c, today=today, pace=DAY_PACE).run(days)
     print(f"Garmin sync {start} → {end}: {counts}")
     return counts
 

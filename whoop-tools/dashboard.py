@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Localhost dashboard for your WHOOP data. Run: python dashboard.py -> http://localhost:8787
+"""Localhost dashboard for Garmin Connect. Run: python dashboard.py -> http://localhost:8787
 
 The front end lives in static/ (index.html, app.css, app.js, vendored Chart.js) and
 works fully offline. This file only serves it plus two JSON endpoints.
@@ -232,47 +232,6 @@ def feel():
     c = db.connect()
     learn.record_feel(c, word)
     return jsonify({"feel": word, "thresholds": learn.thresholds(c)})
-
-
-@app.route("/api/alarm", methods=["GET", "POST"])
-def alarm_api():
-    """Silent alarm. GET: the alarm and whether the strap holds it.
-    POST {"time": "07:00", "daily": true} sets it; {"off": true} turns it off.
-    The daemon (which holds the strap) puts it on the strap within a few seconds."""
-    import alarm, collector
-    c = db.connect()
-    if request.method == "POST":
-        if request.headers.get("X-Vitals") != "1":
-            return jsonify({"error": "missing header"}), 403
-        if DEMO:
-            return jsonify({"error": "Demo database: the alarm is disabled."}), 409
-        body = request.get_json(silent=True) or {}
-        try:
-            if body.get("off"):
-                alarm.turn_off(c)
-            else:
-                alarm.set_alarm(c, body.get("time", ""), daily=bool(body.get("daily", True)))
-        except ValueError as ex:
-            return jsonify({"error": str(ex)}), 400
-        end = time.time() + 6                    # give the daemon a moment to put it on the strap
-        while collector.lock_holder() and alarm.due_for_sync(c) and time.time() < end:
-            time.sleep(0.3)
-    return jsonify(dict(alarm.status(c), daemon=bool(collector.lock_holder())))
-
-
-@app.route("/api/buzz", methods=["POST"])
-def buzz_api():
-    """Vibrate the strap once (a test). Runs through the daemon, which holds the strap."""
-    import alarm, collector
-    if request.headers.get("X-Vitals") != "1":
-        return jsonify({"error": "missing header"}), 403
-    if DEMO:
-        return jsonify({"error": "Demo database: no strap."}), 409
-    if not collector.lock_holder():
-        return jsonify({"error": "The strap service is not running, so nothing can reach the strap."}), 409
-    c = db.connect()
-    r = alarm.wait(c, alarm.request(c, "buzz", {"pattern": 2, "loops": 1}), timeout=8)
-    return jsonify({"status": r["status"]}), 200 if r["status"] == "done" else 504
 
 
 @app.route("/static/chart.js")

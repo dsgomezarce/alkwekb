@@ -3,7 +3,7 @@
 
 Run:  python -m unittest test_garmin -v
 """
-import base64, json, os, stat, tempfile, unittest
+import base64, json, os, stat, sys, tempfile, unittest
 
 _TMP = tempfile.mkdtemp(prefix="garmin-feed-test-")
 os.environ["WHOOP_DB"] = os.path.join(_TMP, "test.db")
@@ -23,11 +23,12 @@ def _jwt(exp=4_000_000_000):
 
 
 class Resp:
-    def __init__(self, status, body):
+    def __init__(self, status, body, headers=None):
         self.status_code = status
         self._body = body
         self.text = body if isinstance(body, str) else json.dumps(body)
         self.ok = 200 <= status < 300
+        self.headers = headers or {}
 
     def json(self):
         if isinstance(self._body, str):
@@ -50,6 +51,23 @@ class FakeSession:
         if path not in self.routes:
             return Resp(404, "")
         return Resp(200, self.routes[path])
+
+
+class RateSession(FakeSession):
+    """Heart-rate GETs fail with 429 until `fails` runs out."""
+
+    def __init__(self, routes, fails):
+        super().__init__(routes)
+        self.fails = dict(fails)
+
+    def get(self, url, headers=None, params=None, timeout=None):
+        path = url.split("personal.connectapi.garmin.com", 1)[-1]
+        left = self.fails.get(path, 0)
+        if left:
+            self.fails[path] = left - 1
+            self.calls.append(("GET", url, dict(params or {}), dict(headers or {})))
+            return Resp(429, "")
+        return super().get(url, headers=headers, params=params, timeout=timeout)
 
 
 def fixture_routes():
@@ -203,6 +221,65 @@ class GarminMapTest(unittest.TestCase):
         self.assertEqual(garmin_nights[0]["total_rem_ms"], 6600 * 1000)
         refused = dashboard.app.test_client().post("/api/sync")
         self.assertEqual(refused.status_code, 403)
+        self.assertNotIn("bleak", sys.modules)
+        self.assertNotIn("whoop", sys.modules)
+        alarm = dashboard.app.test_client().get("/api/alarm")
+        buzz = dashboard.app.test_client().post("/api/buzz", headers={"X-Vitals": "1"})
+        self.assertEqual(alarm.status_code, 404)
+        self.assertEqual(buzz.status_code, 404)
+        self.assertNotIn("bleak", sys.modules)
+        page = dashboard.app.test_client().get("/").get_data(as_text=True)
+        self.assertIn('title="dsgomezarce"', page)
+        self.assertIn(">A</span>", page)
+        self.assertNotIn("WHOOP", page)
+        self.assertNotIn("smiley.png", page)
+        self.assertNotIn("alarm-card", page)
+        self.assertNotIn("alkwekb", page.lower())
+
+    def test_second_sync_keeps_heart_samples(self):
+        first, _, _ = garmin_api.Sync(self.client, self.c, today=DAY).run(days=1)
+        self.assertEqual(first["heart"], 2)
+        self.assertEqual(first["heart_kept"], 0)
+        stored = self.c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"]
+        self.assertEqual(stored, 2)
+        # A new connection sees the same rows: the first sync committed them.
+        other = db.connect()
+        self.assertEqual(other.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 2)
+        other.close()
+        second, _, _ = garmin_api.Sync(self.client, self.c, today=DAY).run(days=1)
+        self.assertEqual(second["heart"], 0)
+        self.assertEqual(second["heart_kept"], 2)
+        self.assertEqual(second["skipped"], 0)
+        again = self.c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"]
+        self.assertEqual(again, stored)
+        row = self.c.execute(
+            "SELECT hr, source FROM ble_hr WHERE ABS(ts - ?) < 0.001", (float(TS + 60),)).fetchone()
+        self.assertEqual((row["hr"], row["source"]), (70, "garmin"))
+
+    def test_rate_limit_retries_and_refills_the_skipped_day(self):
+        sleeps = []
+        session = RateSession(fixture_routes(), {garmin_api.HEART_PATH: 99})
+        client = garmin_api.GarminClient(
+            "test-key-not-a-secret", base=garmin_api.BASE, session=session,
+            token_path=self.token, now=lambda: 1_700_000_000, sleep=lambda s: sleeps.append(s))
+        counts, _, _ = garmin_api.Sync(client, self.c, today=DAY).run(days=1)
+        self.assertEqual(counts["heart"], 0)
+        self.assertEqual(counts["skipped"], 1)
+        self.assertEqual(sleeps, list(garmin_api.RETRY_WAITS))
+        self.assertEqual(json.loads(db.get_state(self.c, garmin_api.RETRY_KEY)), [DAY])
+        self.assertEqual(db.get_state(self.c, "garmin_since"), "2026-11-18")
+        self.assertEqual(self.c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 0)
+
+        session.fails[garmin_api.HEART_PATH] = 0
+        sleeps.clear()
+        again, _, _ = garmin_api.Sync(client, self.c, today=DAY).run(days=1)
+        self.assertEqual(again["heart"], 2)
+        self.assertEqual(again["heart_kept"], 0)
+        self.assertEqual(again["skipped"], 0)
+        self.assertEqual(json.loads(db.get_state(self.c, garmin_api.RETRY_KEY)), [])
+        self.assertEqual(db.get_state(self.c, "garmin_since"), DAY)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) n FROM ble_hr WHERE source='garmin'").fetchone()["n"], 2)
+        self.assertEqual(sleeps, [])
 
 
 if __name__ == "__main__":
