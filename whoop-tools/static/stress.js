@@ -32,7 +32,7 @@
     if (!now || !canvas) return;
     const today = s && s.date === ymd(Date.now());
     if (!today) {
-      now.innerHTML = `<span class="stress__level">No reading</span><span class="stress__why">Nothing from the strap today yet.</span>`;
+      now.innerHTML = `<span class="stress__level">No reading</span><span class="stress__why">Nothing from Garmin today yet.</span>`;
       meta.textContent = "";
       base.textContent = s?.baseline?.text || "";
       chart?.destroy(); chart = null;
@@ -43,7 +43,7 @@
       now.style.setProperty("--c", `var(${LEVEL_VAR[n.level]})`);
       now.innerHTML = `<span class="stress__dot" aria-hidden="true"></span><span class="stress__level">${n.level}</span>
         <span class="stress__num">${n1.format(n.score)}<small> / 3</small></span>
-        <span class="stress__why">as of ${dTime.format(n.ts * 1000)}${n.pending ? ", newer minutes still coming in from the strap" : ""}</span>`;
+        <span class="stress__why">as of ${dTime.format(n.ts * 1000)}${n.pending ? ", newer minutes still coming in" : ""}</span>`;
     } else {
       now.style.removeProperty("--c");
       now.innerHTML = `<span class="stress__level">Can't tell right now</span><span class="stress__why">${esc(n.why)}${n.ts ? ` (${dTime.format(n.ts * 1000)})` : ""}</span>`;

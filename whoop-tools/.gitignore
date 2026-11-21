@@ -1,6 +1,8 @@
 .venv/
 .env
 .tokens.json
+.garmin_token.json
+.garmin_token.json.tmp
 *.db
 *.db-wal
 *.db-shm

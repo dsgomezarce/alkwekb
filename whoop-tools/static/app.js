@@ -278,7 +278,7 @@
   /* ───────── Top bar / header / sidebar ───────── */
   const dToday = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" });
   function renderHeader(d) {
-    const name = d.profile?.first_name;
+    const name = d.profile?.garmin_name || d.profile?.first_name;
     const h = new Date().getHours();
     const part = h < 5 ? "evening" : h < 12 ? "morning" : h < 18 ? "afternoon" : "evening";
     $("#greeting").textContent = name ? `Good ${part}, ${name}` : `Good ${part}`;
@@ -286,20 +286,26 @@
     $("#patient-name").textContent = name || "My vitals";
     $("#avatar").textContent = (name || "V").slice(0, 1).toUpperCase();
 
-    const latest = d.recovery[0]?.created_at;
-    const stale = latest && Date.now() - +day(latest) > 3 * DAY;
     const parts = [];
-    if (d.sync?.ble) parts.push(`Strap ${ago(d.sync.ble * 1000)}`);
+    if (d.sync?.garmin) parts.push(`Garmin ${ago(d.sync.garmin * 1000)}`);
 
     if (d.cloud && d.sync?.cloud) parts.push(`Mac pushed ${ago(d.sync.cloud * 1000)}`);
     document.querySelectorAll("[data-cloud-only]").forEach((n) => { n.hidden = !d.cloud; });
     $("#sync-text").textContent = parts.join(" · ") || "Not synced yet";
     const chip = $("#sync-status");
-    chip.toggleAttribute("data-stale", !d.sync?.ble || Date.now() - d.sync.ble * 1000 > 6 * 36e5);
-    chip.title = "Last time the strap synced to this Mac";
-
-    $("#side-ble").textContent = d.sync?.ble ? ago(d.sync.ble * 1000) : "Never";
+    const syncedAt = d.sync?.garmin;
+    chip.toggleAttribute("data-stale", !syncedAt || Date.now() - syncedAt * 1000 > 6 * 36e5);
+    chip.title = "Last Garmin sync";
+    const bleLabel = document.getElementById("side-ble-label");
+    if (bleLabel) bleLabel.textContent = "Garmin";
+    $("#side-device").textContent = "Garmin";
+    $("#side-ble").textContent = d.sync?.garmin ? ago(d.sync.garmin * 1000) : "Not synced";
+    $("#side-bat").textContent = "Garmin";
     $("#side-api").textContent = d.archive?.end ? `to ${dFull.format(+day(d.archive.end))}` : "None";
+    const kept = document.getElementById("side-kept");
+    if (kept) kept.textContent = "";
+    const mark = document.querySelector(".brand");
+    if (mark) { mark.title = "dsgomezarce"; mark.setAttribute("aria-label", "dsgomezarce"); }
   }
 
   /* ───────── Reference range (lab-report style) ───────── */
@@ -339,7 +345,7 @@
       arcs.forEach((a) => a.setAttribute("stroke-dasharray", `${Math.max(0.5, r?.recovery_score ?? 0)} 100`))));
     $(".status__text", status).textContent = r ? ZONE_LABEL[z] : "No score yet";
     const why = heldWhy("recovery");
-    $("#rec-date").textContent = r ? (r.est ? `Estimated from the strap for ${dLong.format(+day(r.created_at))} (model ${r.est})` : `Scored ${dLong.format(+day(r.created_at))}`)
+    $("#rec-date").textContent = r ? `From Garmin ${dLong.format(+day(r.created_at))}`
       : why ? `Held back: ${why}` : "No recovery for this day";
     ring.setAttribute("role", "img");
     ring.setAttribute("aria-label", r ? `Recovery ${fmt(r.recovery_score)} percent, ${ZONE_LABEL[z].toLowerCase()}` : "No recovery score");
@@ -524,7 +530,7 @@
     if (!s) {
       const why = heldWhy("sleep");
       $("#ln-date").textContent = "";
-      host.innerHTML = `<div class="empty"><div><strong>No sleep for this night</strong>${why ? `Held back: ${esc(why)}` : "Wear the strap overnight, then sync."}</div></div>`;
+      host.innerHTML = `<div class="empty"><div><strong>No sleep for this night</strong>${why ? `Held back: ${esc(why)}` : "Sync Garmin. A night shows up here after Connect has scored it."}</div></div>`;
       return;
     }
     const recent = Date.now() - +day(s.end) < 36 * 36e5;
@@ -536,7 +542,7 @@
     host.innerHTML = `
       <div>
         <p class="headline" aria-label="${hm(asleep)} asleep"><span class="headline__num">${Math.floor(asleep / 36e5)}</span><span class="headline__unit">h</span><span class="headline__num">${Math.round((asleep % 36e5) / 6e4)}</span><span class="headline__unit">m</span></p>
-        <p class="headline__label">Time asleep${s.sleep_perf == null ? "" : ` · ${fmt(s.sleep_perf)}% of sleep needed`}${s.est ? ` · strap estimate (${s.est}), no sleep stages` : ""}</p>
+        <p class="headline__label">Time asleep${s.sleep_perf == null ? "" : ` · ${fmt(s.sleep_perf)}% of sleep needed`} · Garmin</p>
       </div>
       <div>
         <div class="stagebar" role="img" aria-label="${SG.map((st) => `${st.label} ${hm(s[st.key])}`).join(", ")}">
@@ -556,7 +562,7 @@
 
   function renderSleepChart(d) {
     const rows = inRange(d.sleep.slice().reverse(), "end");
-    if (!rows.length) return emptyState("c-sleep", "No sleep in this range", "Sleep appears here after a night the strap recorded.");
+    if (!rows.length) return emptyState("c-sleep", "No sleep in this range", "Sleep appears here after a Garmin sync.");
     clearEmpty("c-sleep");
     const h = (ms) => (ms || 0) / 36e5;
     const asleep = rows.map((s) => h(s.total_in_bed_ms) - h(s.total_awake_ms));
@@ -572,7 +578,7 @@
       type: "bar",
       data: {
         labels: rows.map((s) => dShort.format(+day(s.end))),
-        datasets: [...STAGES, { key: "_asleep", label: "Asleep (strap estimate, no stages)", color: "--stage-light" }].map((st, i, all) => ({
+        datasets: [...STAGES, { key: "_asleep", label: "Asleep", color: "--stage-light" }].map((st, i, all) => ({
           label: st.label, data: rows.map((s) => h(withAsleep(s)[st.key])), backgroundColor: st.key === "_asleep" ? alpha(tok(st.color), 0.55) : tok(st.color),
           borderColor: surface, borderWidth: { top: i === all.length - 1 ? 0 : 1.5, bottom: 0, left: 0, right: 0 },
           borderRadius: i === all.length - 1 ? { topLeft: 3, topRight: 3 } : 0, borderSkipped: false,
@@ -586,15 +592,21 @@
 
   /* ───────── Activity ───────── */
   function renderStrain(d) {
-    const rows = inRange(d.cycle.filter((c) => c.end && c.strain > 0).reverse(), "start");
-    if (!rows.length) return emptyState("c-strain", "No strain in this range", "Strap strain appears for each finished day the strap recorded at least 85% of.");
+    const garmin = true;
+    const heading = document.getElementById("st-h");
+    if (heading) heading.textContent = "Active calories";
+    const rows = inRange(d.cycle.filter((c) => c.end && (c.kilojoule || 0) > 0).reverse(), "start");
+    if (!rows.length) return emptyState("c-strain", "No Garmin activity in this range", "A day shows up here after Garmin sync when that day has calories.");
     clearEmpty("c-strain");
-    const vals = rows.map((r) => r.strain);
+    const vals = rows.map((r) => garmin ? r.kilojoule / 4.184 : r.strain);
     const peak = rows[vals.indexOf(Math.max(...vals))];
-    $("#st-stat").innerHTML = `Average <strong>${fmt(mean(vals), 1)}</strong> · peak ${fmt(peak.strain, 1)} on ${dShort.format(+day(peak.start))}`;
-    const o = baseOptions({ y: { min: 0, max: 21, ticks: { ...baseOptions().scales.y.ticks, stepSize: 7 } }, plugins: { avgLine: { value: mean(vals) } } });
+    const peakVal = garmin ? peak.kilojoule / 4.184 : peak.strain;
+    $("#st-stat").innerHTML = `Average <strong>${fmt(mean(vals), garmin ? 0 : 1)}</strong>${garmin ? " kcal" : ""} · peak ${fmt(peakVal, garmin ? 0 : 1)} on ${dShort.format(+day(peak.start))}`;
+    const o = baseOptions(garmin
+      ? { y: { min: 0, ticks: { ...baseOptions().scales.y.ticks } }, plugins: { avgLine: { value: mean(vals) } } }
+      : { y: { min: 0, max: 21, ticks: { ...baseOptions().scales.y.ticks, stepSize: 7 } }, plugins: { avgLine: { value: mean(vals) } } });
     o.plugins.tooltip.callbacks = {
-      label: (i) => ` Strain ${fmt(i.parsed.y, 1)}${estNote(rows[i.dataIndex])}`,
+      label: (i) => garmin ? ` ${fmt(i.parsed.y, 0)} kcal` : ` Strain ${fmt(i.parsed.y, 1)}${estNote(rows[i.dataIndex])}`,
       afterLabel: (i) => {
         const r = rows[i.dataIndex];
         return r.avg_hr ? ` Avg ${fmt(r.avg_hr)} bpm · max ${fmt(r.max_hr)} bpm` : "";
@@ -606,7 +618,9 @@
       options: o,
       plugins: [avgLine],
     });
-    c.canvas.setAttribute("aria-label", `Day strain over the last ${RANGE} days, average ${fmt(mean(vals), 1)} out of 21.`);
+    c.canvas.setAttribute("aria-label", garmin
+      ? `Active calories over the last ${RANGE} days, average ${fmt(mean(vals), 0)} kcal.`
+      : `Day strain over the last ${RANGE} days, average ${fmt(mean(vals), 1)} out of 21.`);
   }
 
   const ZONES = [
@@ -654,7 +668,7 @@
     $("#wo-count").textContent = all.length ? `${all.length} recorded` : "";
     const body = $("#wo-body");
     if (!all.length) {
-      body.innerHTML = `<tr><td colspan="7"><div class="empty"><div><strong>No workouts yet</strong>Workouts logged in WHOOP show up here after a sync.</div></div></td></tr>`;
+      body.innerHTML = `<tr><td colspan="7"><div class="empty"><div><strong>No workouts yet</strong>Garmin activities show up here after a sync.</div></div></td></tr>`;
       return;
     }
     body.innerHTML = shown.map((w) => {
@@ -680,42 +694,22 @@
   /* ───────── Device ───────── */
   const TAG = { SUPERVISOR: "#f4b740", BLE: "#6cb8ff", SENSOR: "#3df5b0", STORAGE: "#a08fff", HR: "#ff7a90" };
   function renderDevice(d) {
-    // Two batteries: the strap's own gauge (GetBatteryLevel) and the Bluetooth Battery Level
-    // value, which reads differently and is most likely the slide-on battery pack. The
-    // firmware's "SOC report" log lines are not used: a history drain replays old ones.
-    const soc = d.soc || [];
-    const strap = d.battery != null ? d.battery : d.demo && soc.length ? soc.at(-1).soc_pct : null;
-    const pack = d.pack_battery ?? null;
     const bat = $("#battery");
-    $("#side-bat").textContent = strap != null ? `${fmt(strap)}%` : "—";
-    if (strap == null && pack == null) {
-      bat.innerHTML = `<div class="empty"><div><strong>No battery reading yet</strong>The Mac asks the strap every few minutes while it is in range.</div></div>`;
-      return renderDeviceRest(d);
-    }
-    const row = (name, v) => {
-      if (v == null) return `<div class="battery__row"><span class="battery__label">${name}</span><span class="battery__num battery__num--none">—</span></div>`;
-      const z = v < 15 ? "low" : v < 30 ? "fair" : "good";
-      return `<div class="battery__row" data-zone="${z}">
-        <span class="battery__label">${name}</span>
-        <span class="battery__icon" aria-hidden="true"><span class="battery__fill" style="width:${Math.max(4, v)}%"></span></span>
-        <span class="battery__num">${fmt(v)}<small>%</small></span>
-        ${z === "good" ? "" : `<span class="status-chip" data-zone="${z}"><span class="status__icon" aria-hidden="true"></span>${z === "low" ? "Charge soon" : "Getting low"}</span>`}
-      </div>`;
-    };
-    bat.innerHTML = row("Strap", strap) + row("Battery pack", pack);
+    $("#side-bat").textContent = "Garmin";
+    bat.innerHTML = `<div class="empty"><div><strong>No battery</strong>Garmin Connect does not report one.</div></div>`;
     renderDeviceRest(d);
   }
 
   function renderDeviceRest(d) {
 
-    const labels = { api_recovery: "Recovery scores", api_sleep: "Sleeps", api_cycle: "Daily cycles", api_workout: "Workouts", ble_hr: "Live HR samples", ble_raw: "Raw strap frames" };
+    const labels = { api_recovery: "Recovery scores", api_sleep: "Sleeps", api_cycle: "Daily cycles", api_workout: "Workouts", ble_hr: "Heart rate samples", ble_raw: "Raw frames" };
     $("#counts").innerHTML = Object.entries(d.counts).map(([k, v]) => `<div><dt>${labels[k] || k}</dt><dd>${n0.format(v)}</dd></div>`).join("");
     renderCoverage(d.coverage || []);
 
     const logs = d.logs || [];
     $("#logs").innerHTML = logs.length
       ? logs.map((l) => `<li><span class="t">${esc(l.rtc)}</span><span class="s" style="--tag:${TAG[l.subsystem] || "#8b949e"}">${esc(l.subsystem)}</span><span class="m">${esc(l.message)}</span></li>`).join("")
-      : `<li class="empty"><div><strong>No firmware logs decoded</strong>Run decode.py after a strap drain.</div></li>`;
+      : `<li class="empty"><div><strong>No device log</strong>Heart rate, sleep, and activity come from Garmin Connect.</div></li>`;
   }
 
   // How much of each day has heart rate (metrics.coverage_days on the Mac). The light part of
@@ -723,7 +717,7 @@
   function renderCoverage(days) {
     const el = $("#coverage");
     if (!days.length) {
-      el.innerHTML = `<li class="empty"><div><strong>No heart rate yet</strong>Coverage shows once the strap has synced.</div></li>`;
+      el.innerHTML = `<li class="empty"><div><strong>No heart rate yet</strong>Coverage shows after a Garmin sync.</div></li>`;
       return;
     }
     const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -733,12 +727,10 @@
       const rec = Math.min(100, c.share * 100);
       const wait = c.span_s ? Math.min(100 - rec, (c.pending_s / c.span_s) * 100) : 0;
       const notes = [];
-      const longestWaits = c.longest && c.longest.why.startsWith("still on the strap");
-      if (c.pending_s >= 600 && !longestWaits) notes.push(`${dur(c.pending_s)} still on the strap, comes in at the next sync.`);
-      if (c.longest && c.share < 0.95) notes.push(`Longest gap ${hm(c.longest.start)}–${hm(c.longest.end)}: ${c.longest.why}.`);
+      if (c.longest && c.share < 0.95) notes.push(`Longest gap ${hm(c.longest.start)}–${hm(c.longest.end)}.`);
       return `<li class="coverage__row">
         <span class="coverage__day">${esc(day)}</span>
-        <span class="coverage__bar" role="img" aria-label="${fmt(rec)} percent recorded${wait >= 1 ? `, ${fmt(wait)} percent still on the strap` : ""}"><i style="width:${rec}%"></i><i style="width:${wait}%"></i></span>
+        <span class="coverage__bar" role="img" aria-label="${fmt(rec)} percent recorded"><i style="width:${rec}%"></i><i style="width:${wait}%"></i></span>
         <span class="coverage__pct">${fmt(rec)}%</span>
         ${notes.length ? `<span class="coverage__why">${esc(notes.join(" "))}</span>` : ""}
       </li>`;
@@ -760,25 +752,22 @@
     lastLive = L;
     const card = $(".card--monitor");
     const pill = $("#live-pill"), pillText = $("#live-pill-text");
-    const all = (L?.recent || []).filter((r) => r.hr);
+    const all = (L?.recent || []).filter((r) => r.hr && r.source === "garmin");
     const today = ymd(Date.now());
     const recent = all.filter((r) => ymd(r.ts * 1000) === today); // the trace and its stats are today's samples only
-    const live = !!L?.live;
-    card.dataset.live = String(live);
-    pill.dataset.state = live ? "live" : "off";
-    pillText.textContent = live ? "Live" : "Offline";
-    $("#side-dot").dataset.state = live ? "live" : "off";
-    $("#side-device").textContent = live ? "WHOOP 4.0 · streaming" : "WHOOP 4.0";
-    const hr = currentHr(L);
-    const heard = L?.ts ? L.ts * 1000 : all.at(-1)?.ts * 1000;
-    $("#device-state .dot").dataset.state = live ? "live" : "off";
-    $("#device-state-text").textContent = live ? "Connected, streaming now" : heard ? `Not connected · last heard ${ago(heard)}` : "Not connected";
+    const live = false;
+    card.dataset.live = "false";
+    pill.dataset.state = "off";
+    pillText.textContent = "Garmin";
+    $("#side-dot").dataset.state = recent.length ? "ok" : "off";
+    $("#side-device").textContent = "Garmin";
+    const hr = currentHr({ ...L, live: false, recent: all });
+    const heard = all.at(-1)?.ts * 1000;
+    $("#device-state .dot").dataset.state = heard ? "ok" : "off";
+    $("#device-state-text").textContent = heard ? `Last Garmin reading ${ago(heard)}` : "Not synced";
     $("#live-hr").textContent = hr ?? "—";
-    if (live && hr) card.style.setProperty("--beat", `${(60 / hr).toFixed(2)}s`);
-    const lastTs = L?.ts ? L.ts * 1000 : all.at(-1)?.ts * 1000;
-    $("#live-note").textContent = live
-      ? "Streaming from the strap"
-      : lastTs ? `Last reading ${ago(lastTs)}.${DATA?.cloud ? " Synced from your Mac." : " Run daemon.py to stream."}` : DATA?.cloud ? "No readings synced yet." : "No readings yet. Run daemon.py with the strap nearby.";
+    const lastTs = all.at(-1)?.ts * 1000;
+    $("#live-note").textContent = lastTs ? `Last reading ${ago(lastTs)}.` : "No readings yet. Sync Garmin.";
     const rr = L?.rr_ms?.[0];
     $("#live-rr").textContent = live && rr ? `${fmt(rr)} ms` : "—";
     const hrs = recent.map((r) => r.hr);
@@ -821,7 +810,7 @@
   async function pollLive() {
     try {
       const L = await (await fetch("/api/live", { cache: "no-store" })).json();
-      if (wasLive !== null && wasLive !== L.live) announcer.textContent = L.live ? `Strap connected, ${L.hr} beats per minute` : "Strap disconnected";
+      if (wasLive !== null && wasLive !== !!L.hr) announcer.textContent = L.hr ? `Heart rate ${L.hr}` : "No current heart rate";
       wasLive = L.live;
       renderLive(L);
       dispatchEvent(new CustomEvent("vitals:live", { detail: L }));
@@ -869,17 +858,10 @@
   // Strap estimates (scores.py) come next to WHOOP's own rows, shaped the same, marked with
   // `est` (the model version). Only days after WHOOP's last score of each kind are added, so a
   // WHOOP score always wins over an estimate.
-  function mergeEstimates(D) {
-    const E = D.estimates;
-    if (!E) return;
-    for (const [name, key] of [["recovery", "created_at"], ["sleep", "end"], ["cycle", "start"]]) {
-      const est = (E[name] || []).filter((r) => r[key]);
-      if (!est.length) continue;
-      const lastWhoop = D[name].length ? Math.max(...D[name].map((r) => +day(r[key]))) : 0;
-      D[name] = [...est.filter((r) => +day(r[key]) > lastWhoop), ...D[name]].sort((a, b) => +day(b[key]) - +day(a[key]));
-    }
+  function mergeEstimates() {
+    // This board shows Garmin Connect only. Strap estimates are not mixed in.
   }
-  const estNote = (r) => (r?.est ? ` · strap estimate (${r.est})` : "");
+  const estNote = () => "";
   // The Day view shows a score only on the day it belongs to: an older one is not "this day".
   const ofDay = (r, key) => (r && (!ADATE || ymd(+day(r[key])) === ADATE) ? r : null);
   // Why a strap estimate for the chosen day was held back (scores.py's checks), if it was.
@@ -887,12 +869,20 @@
   const VS = (window.VITALS = { get period() { return PERIOD; }, get date() { return ADATE; }, today: null, baseline: null, setPeriod, setDate, openCal, currentHr });
 
   // Archive lens: everything up to the end of the chosen day, so "latest" = that day.
+  const onFeed = (r) => !!(r && r.source === "garmin");
   function V() {
-    if (!DATA || !ADATE) return DATA;
-    const end = +fromYmd(ADATE) + DAY;
-    const le = (k) => (r) => +day(r[k]) < end;
-    return { ...DATA, recovery: DATA.recovery.filter(le("created_at")), sleep: DATA.sleep.filter(le("end")),
-      cycle: DATA.cycle.filter(le("start")), workout: DATA.workout.filter(le("start")) };
+    if (!DATA) return DATA;
+    let recovery = DATA.recovery, sleep = DATA.sleep, cycle = DATA.cycle, workout = DATA.workout;
+    if (ADATE) {
+      const end = +fromYmd(ADATE) + DAY;
+      const le = (k) => (r) => +day(r[k]) < end;
+      recovery = recovery.filter(le("created_at"));
+      sleep = sleep.filter(le("end"));
+      cycle = cycle.filter(le("start"));
+      workout = workout.filter(le("start"));
+    }
+    return { ...DATA, recovery: recovery.filter(onFeed), sleep: sleep.filter(onFeed),
+      cycle: cycle.filter(onFeed), workout: workout.filter(onFeed) };
   }
   function setPeriod(p) {
     if (p === "archive" && !ADATE) return;
@@ -916,11 +906,7 @@
     const a = DATA?.archive;
     if (a?.start) {
       const range = `${dFull.format(+day(a.start))} – ${dFull.format(+day(a.end))}`;
-      const firstEst = [...(DATA.estimates?.recovery || []), ...(DATA.estimates?.sleep || []), ...(DATA.estimates?.cycle || [])]
-        .map((r) => +day(r.created_at || r.end || r.start)).filter(Boolean).sort((x, y) => x - y)[0];
-      $("#arch-text").textContent = `WHOOP's own scores, recorded ${range}.` + (firstEst
-        ? ` From ${dFull.format(firstEst)}, scores are estimated from the strap with a model fitted on that history, marked "strap estimate", and shown only when the data behind them passes its checks.`
-        : " Nothing on this page is from today; today lives under Today.");
+      $("#arch-text").textContent = `Garmin Connect, recorded ${range}. Nothing on this page is from today.`;
       document.querySelectorAll("[data-archive-range]").forEach((n) => { n.textContent = `${new Date(a.start).getFullYear()}–${String(new Date(a.end).getFullYear()).slice(2)}`; });
     }
     dispatchEvent(new CustomEvent("vitals:period", { detail: { period: PERIOD, date: ADATE } }));
@@ -948,7 +934,7 @@
   /* ───────── Today: strap data only ───────── */
   const parseRR = (v) => String(v || "").replace(/[\[\],]/g, " ").split(/\s+/).map(Number).filter((x) => x > 280 && x < 2000);
   function todayStats(d) {
-    const S = (d.today_hr || []).filter((r) => r.hr > 0);
+    const S = (d.today_hr || []).filter((r) => r.hr > 0 && onFeed(r));
     if (!S.length) return null;
     let active = 0, rr = [], diffs = [];
     for (let i = 0; i < S.length; i++) {
@@ -1021,16 +1007,14 @@
     const T = todayStats(d), B = usualBaseline(d);
     for (const k of ["rhr", "hrv", "avgHr"]) if (B[k]) B[k].own = B.own;
     VS.today = T; VS.baseline = B;
-    const yr = B.end ? new Date(B.end).getFullYear() : "";
-    const versus = B.own ? `next to your usual from your last ${B.nights} nights` : `next to your usual from ${yr}`;
     $("#today-meta").textContent = T
-      ? `From the strap since ${dTime.format(T.first)}, ${versus}`
-      : `${dToday.format(new Date())} · no strap data yet today`;
+      ? `From Garmin, ${dTime.format(T.first)} – ${dTime.format(T.last)}`
+      : `${dToday.format(new Date())} · no Garmin heart rate yet today`;
     const host = $("#today-summary");
     if (!T) {
       $("#ts-hint").textContent = "";
-      host.innerHTML = `<div class="empty"><div><strong>Nothing recorded today yet</strong>Keep the strap nearby and press Resync.</div></div>`;
-      emptyState("c-today", "No heart rate today yet", "Samples appear here as soon as the strap streams.");
+      host.innerHTML = `<div class="empty"><div><strong>Nothing from Garmin yet today</strong>Press Sync Garmin.</div></div>`;
+      emptyState("c-today", "No heart rate today yet", "Samples appear here after a Garmin sync.");
       $("#today-stat").textContent = "";
       return;
     }
@@ -1046,10 +1030,10 @@
       <ul class="drivers">
         ${row("Average heart rate", T.avg, "bpm", B.avgHr, "--m-rhr", "")}
         ${row("Lowest heart rate", T.min, "bpm", B.rhr, "--m-rhr", "")}
-        ${T.rmssd ? row("HRV, daytime RMSSD", T.rmssd, "ms", B.hrv, "--m-hrv", "") : row("HRV, daytime RMSSD", null, "ms", null, "--m-hrv", `Needs more clean beat-to-beat data: ${T.nRR} usable intervals so far (the strap's beat timing is only reliable while you're still).`)}
+        ${T.rmssd ? row("HRV, daytime RMSSD", T.rmssd, "ms", B.hrv, "--m-hrv", "") : row("HRV, daytime RMSSD", null, "ms", null, "--m-hrv", `Needs more clean beat-to-beat data: ${T.nRR} usable intervals so far.`)}
       </ul>
       ${learnedBlock(d)}
-      <p class="fine">${B.own ? `Your usual comes from your own last ${B.nights} strap nights.` : `Baselines come from your last 30 archive days (through ${B.end ? dFull.format(+day(B.end)) : "—"}), until the strap has recorded a few of your nights.`} Daytime HRV reads lower than overnight HRV.</p>`;
+      <p class="fine">${B.own ? `Your usual comes from your last ${B.nights} nights.` : `Baselines come from your last 30 archive days (through ${B.end ? dFull.format(+day(B.end)) : "—"}).`} Daytime HRV reads lower than overnight HRV.</p>`;
 
     // Per-minute chart
     const buckets = new Map();
@@ -1104,8 +1088,8 @@
     const tile = (label, val, unit, sub) => `<div class="glance__tile"><p class="glance__label">${label}</p><p class="glance__val">${val}<small>${unit}</small></p><p class="glance__sub">${sub}</p></div>`;
     const asleep = slp ? (slp.total_in_bed_ms || 0) - (slp.total_awake_ms || 0) : null;
     host.innerHTML = [
-      tile("Day strain", fmt(cyc?.strain, 1), "/ 21", cyc?.avg_hr ? `avg ${fmt(cyc.avg_hr)} · max ${fmt(cyc.max_hr)} bpm${cyc.est ? " · estimate" : ""}` : heldWhy("strain") ? `Held back: ${esc(heldWhy("strain"))}` : "&nbsp;"),
-      tile("Sleep", slp ? hm(asleep) : "—", "", slp ? `${fmtU(slp.sleep_perf, "% performance")}${slp.est ? " · estimate" : ""}` : heldWhy("sleep") ? `Held back: ${esc(heldWhy("sleep"))}` : "No sleep scored"),
+      tile("Active calories", cyc?.kilojoule ? fmt(cyc.kilojoule / 4.184, 0) : "—", "kcal", cyc?.avg_hr ? `avg ${fmt(cyc.avg_hr)} · max ${fmt(cyc.max_hr)} bpm` : "No Garmin day yet"),
+      tile("Sleep", slp ? hm(asleep) : "—", "", slp ? `${fmtU(slp.sleep_perf, "% performance")}` : "No sleep scored"),
       tile("Energy", cyc?.kilojoule ? fmt(cyc.kilojoule / 4.184) : "—", "kcal", energySub(cyc)),
       tile("Workouts", String(wos.length), wos.length === 1 ? "session" : "sessions", wos.length ? esc(wos.map((w) => titleCase(w.sport_name)).join(", ")) : "Rest day"),
     ].join("");
@@ -1193,7 +1177,7 @@
     syncBtns().forEach((b) => {
       b.dataset.state = state;
       const l = b.querySelector("[data-resync-label]");
-      if (l) l.textContent = state === "running" ? "Syncing…" : l.closest(".notice") ? "Resync now" : "Resync strap";
+      if (l) l.textContent = state === "running" ? "Syncing…" : l.closest(".notice") ? "Sync Garmin" : "Sync Garmin";
     });
     document.querySelectorAll("[data-sync-msg]").forEach((m) => { m.textContent = msg || ""; m.dataset.tone = tone || ""; });
   }
@@ -1206,11 +1190,10 @@
     }
     await load();
     const after = DATA?.recovery[0]?.created_at;
-    const strap = s.log.find((l) => /drained|not in range|not reachable|holds the strap/.test(l));
     const fresh = after && after !== before;
     setSyncUI("idle",
-      (fresh ? "New WHOOP scores pulled. " : "WHOOP has no newer scores. ") + (strap ? strap.replace(/^strap /, "Strap ") : ""),
-      s.ok === false ? "warn" : fresh ? "ok" : "warn");
+      s.ok === false ? "Garmin sync did not finish. Run it again to fill any skipped days." : "Garmin sync finished.",
+      s.ok === false ? "warn" : fresh ? "ok" : "ok");
   }
   async function startSync() {
     const before = DATA?.recovery[0]?.created_at;
@@ -1243,7 +1226,7 @@
         if (l) l.textContent = "Syncs from your Mac";
         b.setAttribute("aria-label", "Syncs automatically from your Mac");
       }
-      b.title = DATA.demo ? "Disabled on the demo database" : "Drain the strap, stream live HR, pull any new WHOOP scores";
+      b.title = DATA.demo ? "Disabled on the demo database" : "Pull heart rate, sleep, and activity from Garmin.";
     });
   }
 
@@ -1257,8 +1240,9 @@
       DATA = await r.json();
       mergeEstimates(DATA);
       REC_BY_DAY = new Map();
-      for (const x of DATA.recovery.slice().reverse()) REC_BY_DAY.set(ymd(+day(x.created_at)), x);
-      DAYS = new Set([...REC_BY_DAY.keys(), ...DATA.sleep.map((x) => ymd(+day(x.end))), ...DATA.cycle.map((x) => ymd(+day(x.start)))]);
+      const fedRec = DATA.recovery.filter(onFeed);
+      for (const x of fedRec.slice().reverse()) REC_BY_DAY.set(ymd(+day(x.created_at)), x);
+      DAYS = new Set([...REC_BY_DAY.keys(), ...DATA.sleep.filter(onFeed).map((x) => ymd(+day(x.end))), ...DATA.cycle.filter(onFeed).map((x) => ymd(+day(x.start)))]);
       if (!ADATE || !DAYS.has(ADATE)) ADATE = [...DAYS].sort().at(-1) ?? null;
       main.setAttribute("aria-busy", "false");
       renderAll();
@@ -1280,7 +1264,7 @@
     pollLive();
     setInterval(pollLive, 2000);
     setInterval(() => DATA && renderHeader(DATA), 60_000);
-    // Quiet refresh so Today and Device keep up with the strap (no loading shimmer).
+    // Quiet refresh so Today and Device keep up with Garmin (no loading shimmer).
     // It runs every minute, and at once when the tab comes back into view.
     let refreshing = false, refreshedAt = Date.now();
     const refresh = async () => {
@@ -1300,61 +1284,4 @@
     setInterval(refresh, 60_000);
     document.addEventListener("visibilitychange", () => { if (!document.hidden && Date.now() - refreshedAt > 10_000) { pollLive(); refresh(); } });
   });
-})();
-
-/* ───────── Silent alarm (Today). Needs the local strap service, so the card stays
-   hidden where /api/alarm does not exist (the cloud copy of this app). ───────── */
-(() => {
-  const card = document.getElementById("alarm-card");
-  if (!card) return;
-  const $a = (id) => document.getElementById(id);
-  const when = new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
-  const post = (url, body) => fetch(url, { method: "POST", headers: { "X-Vitals": "1", "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
-
-  function show(s) {
-    card.hidden = false;
-    let t;
-    if (!s.enabled) t = "Off. When set, the strap vibrates at that time. No sound.";
-    else {
-      t = `Set for ${s.time} ${s.daily ? "every day" : "once"}. Next: ${when.format(new Date(s.next * 1000))}. `;
-      t += s.on_strap ? "Saved on the strap, so it rings even if this Mac is off."
-        : s.daemon ? "Not on the strap yet: it is added as soon as the strap connects."
-        : "Not on the strap yet: the strap service is not running.";
-      if (!card.contains(document.activeElement)) { $a("alarm-time").value = s.time; $a("alarm-daily").checked = s.daily; }
-    }
-    $a("alarm-status").textContent = t;
-  }
-  async function load() {
-    try {
-      const r = await fetch("/api/alarm", { cache: "no-store" });
-      if (r.ok) show(await r.json());
-    } catch { /* not the local dashboard: keep the card hidden */ }
-  }
-  async function send(body) {
-    $a("alarm-status").textContent = "Saving…";
-    try {
-      const r = await post("/api/alarm", body);
-      const j = await r.json();
-      if (r.ok) show(j); else $a("alarm-status").textContent = j.error || "Could not save the alarm.";
-    } catch { $a("alarm-status").textContent = "Could not reach the dashboard."; }
-  }
-  $a("alarm-form").addEventListener("submit", (e) => {
-    e.preventDefault();
-    send({ time: $a("alarm-time").value, daily: $a("alarm-daily").checked });
-  });
-  $a("alarm-off").addEventListener("click", () => send({ off: true }));
-  $a("alarm-buzz").addEventListener("click", async (e) => {
-    const b = e.currentTarget;
-    b.disabled = true;
-    try {
-      const r = await post("/api/buzz");
-      const j = await r.json();
-      $a("alarm-status").textContent = r.ok ? "Buzz sent. You should feel a short vibration."
-        : j.error || "The strap is not connected right now, so it could not buzz.";
-    } catch { $a("alarm-status").textContent = "Could not reach the dashboard."; }
-    b.disabled = false;
-    setTimeout(load, 5000);
-  });
-  load();
-  setInterval(() => { if (!document.hidden) load(); }, 60_000);
 })();
