@@ -223,7 +223,7 @@
       : r ? `Archive · ${dDay.format(rd)}, ${rd.getFullYear()}` : "Archive";
     const stale = $("#hv-stale");
     stale.hidden = today;
-    stale.textContent = "WHOOP history, not today";
+    stale.textContent = DATA?.feed === "garmin" ? "Garmin history, not today" : "WHOOP history, not today";
 
     // Side card: today = time on strap; archive = that day's recovery
     const card = $("#hv-rec"), num = card.querySelector(".hv-card__num");
@@ -232,8 +232,9 @@
       card.dataset.zone = "today";
       card.querySelector(".hv-card__label").textContent = "Recorded today";
       num.innerHTML = T ? `${Math.floor(T.activeMs / 36e5)}<small>h</small> ${Math.round((T.activeMs % 36e5) / 6e4)}<small>m</small>` : "—";
-      $("#hv-rec-sub").textContent = T ? `since ${dTime.format(T.first)} · ${n0.format(T.samples.length)} samples` : "No strap data yet today";
-      $("#hv-rec-zone").textContent = liveNow ? "Streaming" : "Strap idle";
+      const garmin = DATA?.feed === "garmin";
+      $("#hv-rec-sub").textContent = T ? `since ${dTime.format(T.first)} · ${n0.format(T.samples.length)} samples` : (garmin ? "No Garmin heart rate yet today" : "No strap data yet today");
+      $("#hv-rec-zone").textContent = liveNow ? "Streaming" : (garmin ? "Garmin" : "Strap idle");
     } else {
       const score = r?.recovery_score;
       const z = score == null ? "none" : score >= 67 ? "good" : score >= 34 ? "fair" : "low";
@@ -257,10 +258,15 @@
     const today = isToday();
     boxes.forEach((b) => { b.hidden = !today; });
     if (!today) return;
-    const n = (DATA?.nights || []).find((x) => x.date === ymd(Date.now()));
+    const n = DATA?.feed === "garmin" ? null : (DATA?.nights || []).find((x) => x.date === ymd(Date.now()));
     let html;
     if (!n) {
-      html = `<p class="hv-card__label">Last night</p><p class="sleep__empty">No sleep recorded. Wear the strap to bed and your night shows up here in the morning.</p>`;
+      const gSleep = (DATA?.sleep || []).find((s) => s.source === "garmin");
+      if (DATA?.feed === "garmin" && gSleep) {
+        const asleep = Math.max(0, (gSleep.total_in_bed_ms || 0) - (gSleep.total_awake_ms || 0));
+        const mins = Math.round(asleep / 60000);
+        html = `<p class="hv-card__label">Last night · Garmin</p><p class="hv-card__num">${Math.floor(mins / 60)}<small>h</small> ${mins % 60}<small>m</small></p><p class="sleep__vs">Open Sleep for stages.</p>`;
+      } else html = `<p class="hv-card__label">Last night</p><p class="sleep__empty">${DATA?.feed === "garmin" ? "No Garmin sleep yet. Sync, then open Sleep." : "No sleep recorded. Wear the strap to bed and your night shows up here in the morning."}</p>`;
     } else {
       const done = n.status === "done";
       const t = Math.round(n.asleep_s / 60);
@@ -298,7 +304,7 @@
       const T = window.VITALS?.today;
       tl.setAttribute("role", "img");
       tl.removeAttribute("aria-label");
-      if (!T) { tl.innerHTML = `<p class="tl__empty">No strap data yet today</p>`; return; }
+      if (!T) { tl.innerHTML = `<p class="tl__empty">${DATA?.feed === "garmin" ? "No Garmin heart rate yet today" : "No strap data yet today"}</p>`; return; }
       // Up to 90 bars from the first sample to now: 2 minutes each, wider once the day is longer than 3 hours.
       const first = T.first / 1000, t1 = Math.max(T.last / 1000, Date.now() / 1000);
       const step = Math.max(120, Math.ceil((t1 - first) / 90 / 60) * 60), t0 = Math.floor(first / step) * step;

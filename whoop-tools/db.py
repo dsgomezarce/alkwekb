@@ -68,6 +68,10 @@ CREATE TABLE IF NOT EXISTS strap_cmd (id INTEGER PRIMARY KEY, ts REAL, kind TEXT
 ADDED = [("daily_night", col, typ) for col, typ in (
     ("load_s", "REAL"), ("peak", "INTEGER"), ("recorded_s", "REAL"), ("score", "REAL"),
     ("call", "TEXT"), ("feel", "INTEGER"), ("feel_ts", "REAL"), ("n_rr", "INTEGER"))]
+# Garmin rows share these tables. NULL means the row came from WHOOP (the column
+# was added after those rows were written). "garmin" is written by garmin_api.py.
+ADDED += [(table, "source", "TEXT") for table in
+          ("api_sleep", "api_recovery", "api_cycle", "api_workout", "ble_hr")]
 
 def add_columns(c, added):
     """ALTER TABLE for each (table, column, type) the database doesn't have yet."""

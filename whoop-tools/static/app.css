@@ -169,6 +169,8 @@ svg { flex: none; }
 .patient__meta { min-width: 0; }
 .patient__name { font-weight: 500; font-size: 0.875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .patient__device { display: flex; align-items: center; gap: 6px; color: var(--text-3); font-size: 0.75rem; }
+.patient__kept { margin: 4px 0 0; color: var(--text-3); font-size: 0.75rem; }
+.patient__kept:empty { display: none; }
 
 .nav { display: flex; flex-direction: column; }
 .nav__label { padding: 20px 0 4px; color: var(--text-3); font-size: 0.75rem; }

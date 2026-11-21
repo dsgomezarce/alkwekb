@@ -14,6 +14,29 @@ signals; everything lives in `whoop.db` on your Mac.
    on a strap here.
 2. **Official WHOOP API v2 (OAuth)** — Recovery, HRV, resting HR, SpO₂, skin temp,
    Sleep stages, Strain, workouts, as an archive. File: `whoop_api.py`.
+3. **Garmin Connect Personal API** — heart rate, sleep, and activities, written into
+   the same tables with `source = 'garmin'`. File: `garmin_api.py`. WHOOP rows are
+   left in place. This path does not connect to a strap.
+
+## Garmin (Personal API)
+
+The partner Health API needs a business key. This uses Garmin's published Personal API
+instead. Create a key while logged in (it is shown once):
+
+https://connect.garmin.com/app/settings/personalApiToken
+
+```bash
+cd whoop-tools
+cp .env.example .env   # if you do not already have one
+# Paste the key as GARMIN_PERSONAL_API_KEY. Do not commit .env.
+python garmin_api.py login          # exchanges the key; token stays in .garmin_token.json
+python garmin_api.py sync           # last 14 days, or since the last sync
+python garmin_api.py sync --days 30 # a longer backfill
+python dashboard.py                 # http://localhost:8787
+```
+
+The dashboard **Sync Garmin** button runs `garmin_api.py sync`. It does not drain a strap.
+WHOOP BLE (`whoop.py`, `daemon.py`, `collector.py`) is unchanged.
 
 From the strap's data it also computes sleep, Strain, Sleep and Recovery estimates, breathing
 rate, energy, stress and health alerts (sections below).
