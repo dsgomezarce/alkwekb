@@ -127,7 +127,8 @@ def summary():
         "whoop_rows": _whoop_rows(c),
         "nights": sleep.recent(c, 30),               # how you slept (sleep.py), newest first
         "profile": {"first_name": profile.get("first_name"),
-                    "garmin_name": profile.get("garmin_name")},
+                    "garmin_name": profile.get("garmin_name"),
+                    "garmin_device": profile.get("garmin_device")},
         "recovery": rows(c, "SELECT created_at,recovery_score,hrv_rmssd_ms,resting_hr,spo2,skin_temp_c,source "
                              "FROM api_recovery WHERE recovery_score IS NOT NULL OR source = 'garmin' "
                              "ORDER BY created_at DESC LIMIT ?", HISTORY),

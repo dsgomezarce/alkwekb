@@ -1,4 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="8" fill="#111111"/>
-  <text x="16" y="22" text-anchor="middle" font-family="ui-sans-serif, sans-serif" font-size="16" fill="#eeeeee">A</text>
+  <style>
+    path { fill: none; stroke: #111111; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+    @media (prefers-color-scheme: dark) { path { stroke: #eeeeee; } }
+  </style>
+  <path d="M16 9.4c-.8-1.8-2.5-3.4-4.9-3.4-3.4 0-5.7 2.6-5.7 5.8 0 1.8.7 3.2 1.8 4.2"/>
+  <path d="M16 9.4c.8-1.8 2.5-3.4 4.9-3.4 3.4 0 5.7 2.6 5.7 5.8 0 1.8-.7 3.2-1.8 4.2"/>
+  <path d="M8.2 18.8 16 27.2l7.8-8.4"/>
+  <path d="M1.4 17h9.2l1.8-3.8 2.3 6.6 1.7-4.2L17.9 17H30.6"/>
 </svg>

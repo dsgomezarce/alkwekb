@@ -306,6 +306,23 @@
     if (kept) kept.textContent = "";
     const mark = document.querySelector(".brand");
     if (mark) { mark.title = "dsgomezarce"; mark.setAttribute("aria-label", "dsgomezarce"); }
+    const brandName = document.querySelector(".brand__name");
+    if (brandName) brandName.textContent = "dsgomezarce";
+    const worn = d.profile?.garmin_device;
+    const meta = document.getElementById("device-meta");
+    if (meta) meta.textContent = worn || "Garmin Connect";
+    if (worn) $("#side-device").textContent = worn;
+  }
+
+  function applyMark(id) {
+    const buttons = [...document.querySelectorAll("[data-mark-choice]")];
+    const pick = buttons.find((b) => b.dataset.markChoice === id) || buttons.find((b) => b.dataset.markChoice === "pulse");
+    if (!pick) return;
+    buttons.forEach((b) => b.setAttribute("aria-checked", b === pick ? "true" : "false"));
+    const mark = document.getElementById("brand-mark");
+    const svg = pick.querySelector("svg");
+    if (mark && svg) mark.replaceChildren(svg.cloneNode(true));
+    try { localStorage.setItem("vitals-mark", pick.dataset.markChoice); } catch { /* private mode */ }
   }
 
   /* ───────── Reference range (lab-report style) ───────── */
@@ -760,7 +777,7 @@
     pill.dataset.state = "off";
     pillText.textContent = "Garmin";
     $("#side-dot").dataset.state = recent.length ? "ok" : "off";
-    $("#side-device").textContent = "Garmin";
+    $("#side-device").textContent = DATA?.profile?.garmin_device || "Garmin";
     const hr = currentHr({ ...L, live: false, recent: all });
     const heard = all.at(-1)?.ts * 1000;
     $("#device-state .dot").dataset.state = heard ? "ok" : "off";
@@ -1259,6 +1276,12 @@
   $("#retry").addEventListener("click", load);
 
   window.addEventListener("DOMContentLoaded", () => {
+    let saved = "pulse";
+    try { saved = localStorage.getItem("vitals-mark") || "pulse"; } catch { /* private mode */ }
+    applyMark(saved);
+    document.querySelectorAll("[data-mark-choice]").forEach((b) => {
+      b.addEventListener("click", () => applyMark(b.dataset.markChoice));
+    });
     Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
     load();
     pollLive();

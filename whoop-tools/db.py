@@ -2,7 +2,11 @@
 """SQLite store for WHOOP data from both the official API and the strap (BLE)."""
 import sqlite3, os, json, time
 
-DB_PATH = os.environ.get("WHOOP_DB") or os.path.join(os.path.dirname(__file__), "whoop.db")
+_HERE = os.path.dirname(__file__)
+# The board and `garmin_api.py sync` read garmin.db. WHOOP_DB still overrides the path
+# for tests and a demo file. whoop.db is the previous default and is left in place.
+DB_PATH = os.environ.get("WHOOP_DB") or os.path.join(_HERE, "garmin.db")
+LEGACY_DB = os.path.join(_HERE, "whoop.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_sleep (
@@ -127,7 +131,48 @@ def fix_rr_units(c):
     return len(fixed)
 
 
+def _has_rows(path):
+    """True when a sqlite file already holds Garmin or WHOOP rows."""
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return False
+    c = sqlite3.connect(path)
+    try:
+        names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in ("api_sleep", "api_recovery", "api_cycle", "api_workout", "ble_hr"):
+            if table in names and c.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                return True
+        return False
+    except sqlite3.DatabaseError:
+        return False
+    finally:
+        c.close()
+
+
+def adopt_legacy(path, legacy):
+    """Copy rows from whoop.db into garmin.db when garmin.db is still empty.
+
+    whoop.db is not deleted. A later sync keeps writing garmin.db.
+    """
+    if not legacy or os.path.abspath(legacy) == os.path.abspath(path):
+        return False
+    if not os.path.exists(legacy) or _has_rows(path):
+        return False
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    src = sqlite3.connect(legacy)
+    try:
+        dst = sqlite3.connect(path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    return True
+
+
 def connect():
+    if not os.environ.get("WHOOP_DB"):
+        adopt_legacy(DB_PATH, LEGACY_DB)
     c = sqlite3.connect(DB_PATH, timeout=30)
     c.row_factory = sqlite3.Row
     # WAL: the always-on daemon writes every second while the dashboard reads.

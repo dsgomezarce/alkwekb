@@ -3,7 +3,7 @@
 
 Run:  python -m unittest test_garmin -v
 """
-import base64, json, os, stat, sys, tempfile, unittest
+import base64, json, os, sqlite3, stat, sys, tempfile, unittest
 
 _TMP = tempfile.mkdtemp(prefix="garmin-feed-test-")
 os.environ["WHOOP_DB"] = os.path.join(_TMP, "test.db")
@@ -54,11 +54,12 @@ class FakeSession:
 
 
 class RateSession(FakeSession):
-    """Heart-rate GETs fail with 429 until `fails` runs out."""
+    """Matching GETs fail with `status` until `fails` runs out."""
 
-    def __init__(self, routes, fails):
+    def __init__(self, routes, fails, status=429):
         super().__init__(routes)
         self.fails = dict(fails)
+        self.status = status
 
     def get(self, url, headers=None, params=None, timeout=None):
         path = url.split("personal.connectapi.garmin.com", 1)[-1]
@@ -66,7 +67,7 @@ class RateSession(FakeSession):
         if left:
             self.fails[path] = left - 1
             self.calls.append(("GET", url, dict(params or {}), dict(headers or {})))
-            return Resp(429, "")
+            return Resp(self.status, "")
         return super().get(url, headers=headers, params=params, timeout=timeout)
 
 
@@ -109,6 +110,10 @@ def fixture_routes():
             "startTimeGMT": "2026-11-19 07:30:00", "duration": 1800,
             "activityType": {"typeKey": "running"},
             "averageHR": 145, "maxHR": 168, "calories": 320, "distance": 5000,
+        }],
+        f"{garmin_api.WELLNESS_ACTIVITY_PATH}/{DAY}/{DAY}": [{
+            "calendarDate": DAY, "wellnessActivityType": "HEALTH_MONITORING",
+            "deviceMetaData": {"deviceId": 1, "deviceName": "Forerunner 965"},
         }],
     }
 
@@ -230,11 +235,32 @@ class GarminMapTest(unittest.TestCase):
         self.assertNotIn("bleak", sys.modules)
         page = dashboard.app.test_client().get("/").get_data(as_text=True)
         self.assertIn('title="dsgomezarce"', page)
-        self.assertIn(">A</span>", page)
+        self.assertIn(">dsgomezarce</span>", page)
+        self.assertEqual(page.count("data-mark-choice="), 3)
+        self.assertIn('data-mark-choice="pulse"', page)
+        self.assertNotIn(">A</span>", page)
         self.assertNotIn("WHOOP", page)
         self.assertNotIn("smiley.png", page)
         self.assertNotIn("alarm-card", page)
         self.assertNotIn("alkwekb", page.lower())
+        self.assertNotIn("Garmin Connect on this Mac", page)
+        self.assertIn(">garmin.db</code>", page)
+        self.assertNotIn("whoop.db", page)
+        self.assertEqual(body["profile"]["garmin_device"], "Forerunner 965")
+
+    def test_device_name_is_the_latest_wellness_watch(self):
+        name = garmin_api.device_name([
+            {"calendarDate": "2026-11-18", "deviceMetaData": {"deviceName": "Old Watch"}},
+            {"calendarDate": DAY, "deviceMetaData": {"deviceName": "  Forerunner 965  "}},
+            {"calendarDate": DAY, "deviceMetaData": {}},
+            {"calendarDate": "2026-11-01"},
+        ])
+        self.assertEqual(name, "Forerunner 965")
+        self.assertIsNone(garmin_api.device_name(None))
+        counts, _, _ = garmin_api.Sync(self.client, self.c, today=DAY).run(days=1)
+        self.assertEqual(counts["device"], "Forerunner 965")
+        stored = self.c.execute("SELECT value FROM api_profile WHERE key='garmin_device'").fetchone()
+        self.assertEqual(stored["value"], "Forerunner 965")
 
     def test_second_sync_keeps_heart_samples(self):
         first, _, _ = garmin_api.Sync(self.client, self.c, today=DAY).run(days=1)
@@ -280,6 +306,70 @@ class GarminMapTest(unittest.TestCase):
         self.assertEqual(db.get_state(self.c, "garmin_since"), DAY)
         self.assertEqual(self.c.execute("SELECT COUNT(*) n FROM ble_hr WHERE source='garmin'").fetchone()["n"], 2)
         self.assertEqual(sleeps, [])
+
+    def test_default_window_is_a_year_unless_days_says_otherwise(self):
+        sync = garmin_api.Sync(self.client, self.c, today=DAY)
+        start, end = sync.window(None)
+        self.assertEqual(garmin_api.DEFAULT_DAYS, 365)
+        self.assertEqual((start, end), (garmin_api._shift_day(DAY, -364), DAY))
+        db.set_state(self.c, "garmin_since", DAY)
+        start, _ = sync.window(None)
+        self.assertEqual(start, garmin_api._shift_day(DAY, -364))
+        db.set_state(self.c, "garmin_since", "2020-01-01")
+        start, _ = sync.window(None)
+        self.assertEqual(start, "2019-12-30")
+        start, _ = sync.window(30)
+        self.assertEqual(start, garmin_api._shift_day(DAY, -29))
+
+    def test_summary_500_retries_keeps_going_and_saves_the_hole(self):
+        sleeps = []
+        session = RateSession(fixture_routes(), {garmin_api.DAILIES_PATH: 10_000}, status=500)
+        client = garmin_api.GarminClient(
+            "test-key-not-a-secret", base=garmin_api.BASE, session=session,
+            token_path=self.token, now=lambda: 1_700_000_000, sleep=lambda s: sleeps.append(s))
+        span = garmin_api.DAILY_SPAN
+        garmin_api.DAILY_SPAN = 1
+        try:
+            counts, start, _ = garmin_api.Sync(client, self.c, today=DAY).run(days=2)
+        finally:
+            garmin_api.DAILY_SPAN = span
+        # The year-long call is retried, then each smaller span is retried too.
+        self.assertEqual(sleeps, list(garmin_api.RETRY_WAITS) * 3)
+        self.assertEqual(counts["skipped"], 2)
+        self.assertEqual(counts["heart"], 2)
+        self.assertEqual(start, "2026-11-18")
+        self.assertEqual(json.loads(db.get_state(self.c, garmin_api.RETRY_KEY)),
+                         ["2026-11-18", DAY])
+        self.assertEqual(db.get_state(self.c, "garmin_since"), "2026-11-17")
+        # Heart samples from the days that 500'd are already stored.
+        self.assertEqual(self.c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 2)
+
+        session.fails[garmin_api.DAILIES_PATH] = 0
+        sleeps.clear()
+        again, _, _ = garmin_api.Sync(client, self.c, today=DAY).run(days=2)
+        self.assertEqual(again["skipped"], 0)
+        self.assertEqual(json.loads(db.get_state(self.c, garmin_api.RETRY_KEY)), [])
+        resting = self.c.execute(
+            "SELECT resting_hr FROM api_recovery WHERE cycle_id=?", (-20261119,)).fetchone()
+        self.assertEqual(resting["resting_hr"], 48)
+        self.assertEqual(sleeps, [])
+
+    def test_whoop_db_is_copied_into_garmin_db_and_kept(self):
+        folder = tempfile.mkdtemp(prefix="garmin-db-")
+        legacy = os.path.join(folder, "whoop.db")
+        dest = os.path.join(folder, "garmin.db")
+        src = sqlite3.connect(legacy)
+        src.execute("CREATE TABLE ble_hr (ts REAL PRIMARY KEY, hr INTEGER)")
+        src.execute("INSERT INTO ble_hr(ts, hr) VALUES(1, 61)")
+        src.commit()
+        src.close()
+        self.assertTrue(db.adopt_legacy(dest, legacy))
+        self.assertTrue(os.path.exists(legacy))
+        copied = sqlite3.connect(dest)
+        self.assertEqual(copied.execute("SELECT hr FROM ble_hr").fetchone()[0], 61)
+        copied.close()
+        self.assertFalse(db.adopt_legacy(dest, legacy))
+        self.assertTrue(os.path.exists(legacy))
 
 
 if __name__ == "__main__":

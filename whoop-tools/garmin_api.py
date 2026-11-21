@@ -4,13 +4,13 @@
 The partner Health API needs a Garmin business key. This client uses the published
 Personal API instead: you create a key in Garmin Connect and put it in .env.
 Login exchanges that key for a bearer token. Sync copies heart rate, sleep, and
-activity into whoop.db with source='garmin', so WHOOP rows stay distinct.
+activity into garmin.db with source='garmin', so WHOOP rows stay distinct.
 
 Nothing here talks to a strap. Tokens stay in .garmin_token.json (gitignored).
 
     python garmin_api.py login
-    python garmin_api.py sync
-    python garmin_api.py sync --days 30
+    python garmin_api.py sync                 # last 365 days
+    python garmin_api.py sync --days 30      # a shorter window
 """
 import os, sys, json, time, hashlib, base64, calendar
 import requests
@@ -38,14 +38,23 @@ ACTIVITIES_PATH = "/activitylist-service/activities/search/activities"
 DAILIES_PATH = "/usersummary-service/v2/dailysummaries"
 HRV_PATH = "/hrv-service/hrv"  # + /{date}
 PROFILE_PATH = "/userprofile-service/userprofile/settings"
+# Wellness activities carry deviceMetaData.deviceName, the watch that recorded the day.
+# The published spec has no separate "my devices" list.
+WELLNESS_ACTIVITY_PATH = "/wellnessactivity-service/activity/summary/range"
+WELLNESS_SPAN = 28
 
-DEFAULT_DAYS = 14
+DEFAULT_DAYS = 365
 OVERLAP_DAYS = 2
 MAX_DAYS = 366
+# A year-long daily summary is one call. If that call 500s, walk the year in
+# smaller spans so the days that succeed are kept.
+DAILY_SPAN = 28
 ACTIVITY_PAGE = 100
 KCAL_TO_KJ = 4.184
 # Honor Retry-After when Garmin sends one; otherwise wait 1, 2, 4, 8, 16 seconds.
+# 429 and 500 use the same waits. A 500 is often a transient on a long range.
 RETRY_WAITS = (1, 2, 4, 8, 16)
+RETRY_STATUSES = (429, 500)
 MAX_RETRY_AFTER = 60
 RETRY_KEY = "garmin_retry"
 # A short pause between days so a 90-day pull does not immediately trip the limit.
@@ -166,7 +175,7 @@ class GarminClient:
         if response.status_code == 404 or response.status_code == 204:
             return None
         attempt = 0
-        while response.status_code == 429 and attempt < len(RETRY_WAITS):
+        while response.status_code in RETRY_STATUSES and attempt < len(RETRY_WAITS):
             wait = _retry_after(response)
             if wait is None:
                 wait = RETRY_WAITS[attempt]
@@ -504,6 +513,34 @@ def store_activity(c, activity):
     return True
 
 
+def device_name(summaries):
+    """Display name of the device that recorded the latest wellness activity.
+
+    Published on WellnessActivitySummaryDTO.deviceMetaData.deviceName
+    (GET /wellnessactivity-service/activity/summary/range/{from}/{until}).
+    """
+    best_name, best_day = None, ""
+    rows = summaries if isinstance(summaries, list) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        meta = row.get("deviceMetaData")
+        if not isinstance(meta, dict):
+            continue
+        name = meta.get("deviceName")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        day = str(row.get("calendarDate") or "")
+        if best_name is None or day >= best_day:
+            best_name, best_day = name.strip(), day
+    return best_name
+
+
+def store_device(c, name):
+    if name:
+        db.upsert(c, "api_profile", {"key": "garmin_device", "value": name})
+
+
 def store_profile(c, settings):
     name = display_name(settings)
     if not name:
@@ -536,20 +573,18 @@ class Sync:
         self.pace = pace
 
     def window(self, days):
-        if days is None:
+        """Inclusive start and end. No --days means at least the last 365 days."""
+        explicit = days is not None
+        if not explicit:
+            days = DEFAULT_DAYS
+        days = max(1, min(int(days), MAX_DAYS))
+        start = _shift_day(self.today, -(days - 1))
+        if not explicit:
             since = db.get_state(self.c, "garmin_since")
             if since:
-                t = calendar.timegm(time.strptime(since, "%Y-%m-%d")) - OVERLAP_DAYS * 86400
-                start = time.strftime("%Y-%m-%d", time.gmtime(t))
-            else:
-                days = DEFAULT_DAYS
-                start = None
-        else:
-            start = None
-        if start is None:
-            days = max(1, min(int(days), MAX_DAYS))
-            t = calendar.timegm(time.strptime(self.today, "%Y-%m-%d")) - (days - 1) * 86400
-            start = time.strftime("%Y-%m-%d", time.gmtime(t))
+                earlier = _shift_day(since, -OVERLAP_DAYS)
+                if earlier < start:
+                    start = earlier
         if start > self.today:
             start = self.today
         retry = [d for d in _load_retry(self.c) if d <= self.today]
@@ -564,16 +599,12 @@ class Sync:
             store_profile(self.c, self.client.get(PROFILE_PATH))
         except GarminError as ex:
             print("profile:", ex)
-        dailies = {}
-        try:
-            dailies = _summary_by_day(self.client.get(
-                DAILIES_PATH, {"startDate": start, "endDate": end}))
-        except GarminError as ex:
-            print("daily summaries:", ex)
+        dailies, summary_holes = self._dailies(start, end)
         activities = self._activities(start, end)
         counts = {"heart": 0, "heart_kept": 0, "sleep": 0, "days": 0, "workout": 0, "skipped": 0}
         latest = None
         failed = []
+        hole = set(summary_holes)
         for day in iter_days(start, end):
             heart, heart_ok = self._get(HEART_PATH, {"date": day}, "heart")
             sleep, sleep_ok = self._get(SLEEP_PATH, {"date": day}, "sleep")
@@ -590,7 +621,7 @@ class Sync:
             hrs = [hr for _, hr in samples]
             if store_day(self.c, day, dailies.get(day), hrv_avg(hrv), _spo2(sleep_dto(sleep or {})), hrs):
                 counts["days"] += 1
-            if not (heart_ok and sleep_ok and hrv_ok):
+            if day in hole or not (heart_ok and sleep_ok and hrv_ok):
                 failed.append(day)
             # A later 429 must not throw away the days that already landed.
             self.c.commit()
@@ -599,6 +630,10 @@ class Sync:
         for activity in activities:
             if store_activity(self.c, activity):
                 counts["workout"] += 1
+        worn = self._device(start, end)
+        if worn:
+            store_device(self.c, worn)
+        counts["device"] = worn
         if latest:
             db.set_state(self.c, "garmin_hr_now", json.dumps(
                 {"hr": latest[1], "ts": latest[0], "source": SOURCE}))
@@ -627,6 +662,45 @@ class Sync:
                 day = " " + path.rsplit("/", 1)[-1]
             print(f"{label}{day}:", ex)
             return None, False
+
+    def _dailies(self, start, end):
+        """Daily summaries for the window.
+
+        A 500 on the whole range is retried like a 429. If it still fails, the
+        year is walked in smaller spans. Days that never come back are holes
+        for the next sync. Heart rate, sleep, and activities still run.
+        """
+        payload, ok = self._get(
+            DAILIES_PATH, {"startDate": start, "endDate": end}, "daily summaries")
+        if ok:
+            return _summary_by_day(payload), []
+        if len(list(iter_days(start, end))) <= DAILY_SPAN:
+            return {}, list(iter_days(start, end))
+        merged, holes = {}, []
+        span_start = start
+        while span_start <= end:
+            span_end = min(end, _shift_day(span_start, DAILY_SPAN - 1))
+            payload, ok = self._get(
+                DAILIES_PATH, {"startDate": span_start, "endDate": span_end}, "daily summaries")
+            if ok:
+                merged.update(_summary_by_day(payload))
+            else:
+                holes.extend(iter_days(span_start, span_end))
+            span_start = _shift_day(span_end, 1)
+        return merged, holes
+
+    def _device(self, start, end):
+        """Latest deviceMetaData.deviceName across the window. A miss does not fail the day."""
+        rows = []
+        span_start = start
+        while span_start <= end:
+            span_end = min(end, _shift_day(span_start, WELLNESS_SPAN - 1))
+            payload, ok = self._get(
+                f"{WELLNESS_ACTIVITY_PATH}/{span_start}/{span_end}", None, "device")
+            if ok and isinstance(payload, list):
+                rows.extend(payload)
+            span_start = _shift_day(span_end, 1)
+        return device_name(rows)
 
     def _activities(self, start, end):
         out = []

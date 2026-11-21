@@ -52,7 +52,7 @@ async function startSession(env, location = "/") {
 
 // ───────── Pages: sign in and "add a passkey", in the app's own design ─────────
 // Same system as static/app.css: Inter, Radix gray, hairlines instead of shadows,
-// the smiley mark, dark by default, light when the app's theme toggle says so.
+// the heart mark, dark by default, light when the app's theme toggle says so.
 
 const SHELL = (title, body, script = "") => `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -77,8 +77,10 @@ html{-webkit-text-size-adjust:100%}
 body{margin:0;min-height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;padding:max(24px,env(safe-area-inset-top)) 20px max(24px,env(safe-area-inset-bottom));background:var(--bg);color:var(--text);font:400 0.875rem/1.5 "Inter",ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;letter-spacing:-0.006em;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;font-feature-settings:"cv11","ss01"}
 h1,p{margin:0}
 .card{width:100%;max-width:360px;padding:32px 24px 24px;border:1px solid var(--border);border-radius:12px;background:var(--surface)}
-.brand{display:flex;flex-direction:column;align-items:flex-start;gap:16px;margin-bottom:24px}
-.mark{width:40px;height:40px;display:grid;place-items:center;border:1px solid var(--border-strong);border-radius:10px;font-weight:500}
+.brand{display:flex;flex-direction:column;align-items:flex-start;gap:12px;margin-bottom:24px}
+.mark{width:32px;height:32px;color:var(--text)}
+.mark svg{width:32px;height:32px;display:block;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.who{font-size:0.75rem;color:var(--text-3)}
 h1{font-size:1.25rem;font-weight:500;letter-spacing:-0.012em}
 .lede{margin-top:4px;color:var(--text-2)}
 label{display:block;margin-bottom:6px;font-size:0.8125rem;font-weight:500;color:var(--text-2)}
@@ -108,7 +110,8 @@ ${script ? `<script>${CLIENT_HELPERS}${script}</script>` : ""}
 </body></html>`;
 
 const KEY_ICON = `<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="6.5" cy="10" r="3.5"/><path d="M10 10h7.5M14.5 10v2.5M17 10v2"/></svg>`;
-const BRAND = (title, lede) => `<div class="brand"><span class="mark" title="dsgomezarce">A</span><div><h1>${title}</h1><p class="lede">${lede}</p></div></div>`;
+const MARK = `<span class="mark" title="dsgomezarce" aria-label="dsgomezarce"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 9.4c-.8-1.8-2.5-3.4-4.9-3.4-3.4 0-5.7 2.6-5.7 5.8 0 1.8.7 3.2 1.8 4.2"/><path d="M16 9.4c.8-1.8 2.5-3.4 4.9-3.4 3.4 0 5.7 2.6 5.7 5.8 0 1.8-.7 3.2-1.8 4.2"/><path d="M8.2 18.8 16 27.2l7.8-8.4"/><path d="M1.4 17h9.2l1.8-3.8 2.3 6.6 1.7-4.2L17.9 17H30.6"/></svg></span>`;
+const BRAND = (title, lede) => `<div class="brand">${MARK}<div><p class="who">dsgomezarce</p><h1>${title}</h1><p class="lede">${lede}</p></div></div>`;
 
 // Runs in the browser: base64url <-> bytes, and JSON POST.
 const CLIENT_HELPERS = `
