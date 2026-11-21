@@ -12,7 +12,8 @@
 <link rel="manifest" href="/static/manifest.webmanifest">
 <meta name="color-scheme" content="dark light">
 <title>Vitals</title>
-<link rel="icon" href="/static/mark.svg" type="image/svg+xml">
+<link rel="icon" href="/static/favicon.png" type="image/png" sizes="128x128">
+<link rel="apple-touch-icon" href="/static/icon-256.png" sizes="256x256">
 <script>
   // Apply the saved theme before first paint so there is no flash.
   (function () {
@@ -135,7 +136,7 @@
       <aside class="hv__side" aria-label="Summary">
         <section class="sleep sleep--side" data-sleep aria-label="Last night" hidden></section>
         <article class="hv-card hv-card--rec" id="hv-rec" data-zone="none">
-          <p class="hv-card__label">Recovery</p>
+          <p class="hv-card__label">Body Battery</p>
           <p class="hv-card__num"><span id="hv-rec-num">—</span></p>
           <p class="hv-card__sub" id="hv-rec-sub">&nbsp;</p>
           <p class="hv-card__foot"><span class="hv-dot"></span><span id="hv-rec-zone">No score</span></p>
@@ -287,7 +288,7 @@
           <article class="card card--readiness span-5" aria-labelledby="rec-h">
             <header class="card__head">
               <div>
-                <h3 id="rec-h" class="card__title">Recovery</h3>
+                <h3 id="rec-h" class="card__title">Body Battery</h3>
                 <p class="card__hint" id="rec-date"></p>
               </div>
               <p class="status-chip" id="rec-status" data-zone="none"><span class="status__icon" aria-hidden="true"></span><span class="status__text">No score yet</span></p>
@@ -302,10 +303,10 @@
                 </svg>
                 <div class="ring__label">
                   <span class="ring__num" id="rec-value">—</span>
-                  <span class="ring__unit">%</span>
+                  <span class="ring__unit"></span>
                 </div>
               </div>
-              <ul class="drivers" id="rec-drivers" aria-label="Recovery contributors"></ul>
+              <ul class="drivers" id="rec-drivers" aria-label="Body Battery contributors"></ul>
             </div>
             <p class="insight" id="rec-insight"></p>
           </article>
@@ -345,10 +346,10 @@
           <article class="card span-12" aria-labelledby="t-rec-h">
             <header class="card__head">
               <div>
-                <h3 id="t-rec-h" class="card__title">Recovery</h3>
+                <h3 id="t-rec-h" class="card__title">Body Battery</h3>
                 <p class="card__stat" id="t-rec-stat"></p>
               </div>
-              <ul class="legend" aria-label="Recovery zones">
+              <ul class="legend" aria-label="Body Battery bands">
                 <li><span class="swatch swatch--good"></span>High 67–100</li>
                 <li><span class="swatch swatch--fair"></span>Moderate 34–66</li>
                 <li><span class="swatch swatch--low"></span>Low 0–33</li>

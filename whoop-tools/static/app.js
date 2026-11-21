@@ -337,26 +337,33 @@
   };
 
   /* ───────── Recovery hero ───────── */
+  function dayMetric(d) {
+    return ofDay((d.metrics || [])[0], "at");
+  }
   function renderRecovery(d) {
-    const r = ofDay(d.recovery[0], "created_at");
+    const m = dayMetric(d);
+    const score = m?.body_battery;
     const ring = $("#rec-ring"), status = $("#rec-status"), card = $(".card--readiness");
-    const z = zoneOf(r?.recovery_score);
+    const z = zoneOf(score);
     ring.dataset.zone = z;
     status.dataset.zone = z;
     card.dataset.zone = z;
-    $("#rec-value").textContent = fmt(r?.recovery_score);
+    $("#rec-value").textContent = fmt(score, 0);
+    const unit = $(".ring__unit", ring);
+    if (unit) unit.textContent = "";
     const arcs = [$(".ring__value", ring), $(".ring__glow", ring)];
     arcs.forEach((a) => a.setAttribute("stroke-dasharray", "0 100"));
     requestAnimationFrame(() => requestAnimationFrame(() =>
-      arcs.forEach((a) => a.setAttribute("stroke-dasharray", `${Math.max(0.5, r?.recovery_score ?? 0)} 100`))));
-    $(".status__text", status).textContent = r ? ZONE_LABEL[z] : "No score yet";
-    const why = heldWhy("recovery");
-    $("#rec-date").textContent = r ? `From Garmin ${dLong.format(+day(r.created_at))}`
-      : why ? `Held back: ${why}` : "No recovery for this day";
+      arcs.forEach((a) => a.setAttribute("stroke-dasharray", `${Math.max(0.5, score ?? 0)} 100`))));
+    $(".status__text", status).textContent = score == null ? "No reading" : ZONE_LABEL[z];
+    $("#rec-date").textContent = score == null
+      ? "No Body Battery for this day"
+      : `Body Battery ${dLong.format(+day(m.at))}`;
     ring.setAttribute("role", "img");
-    ring.setAttribute("aria-label", r ? `Recovery ${fmt(r.recovery_score)} percent, ${ZONE_LABEL[z].toLowerCase()}` : "No recovery score");
+    ring.setAttribute("aria-label", score == null ? "No Body Battery" : `Body Battery ${fmt(score, 0)}`);
 
-    if (!r) { $("#rec-drivers").innerHTML = ""; $("#rec-insight").innerHTML = ""; return; }
+    const r = ofDay(d.recovery[0], "created_at");
+    if (!r && score == null) { $("#rec-drivers").innerHTML = ""; $("#rec-insight").innerHTML = ""; return; }
     const rec = d.recovery.slice().reverse(), slp = d.sleep.slice().reverse();
     const DRIVERS = [
       { name: "Heart rate variability", series: rec.map((x) => x.hrv_rmssd_ms), unit: "ms", color: "--m-hrv" },
@@ -379,21 +386,40 @@
       return `${label} is <strong>${n0.format(Math.abs(s.pct))}% ${dir}</strong> your baseline${flag ? "" : ""}`;
     };
     const bits = [say(hrv, "HRV"), say(rhr, "resting heart rate", true)].filter(Boolean);
-    $("#rec-insight").innerHTML = r && bits.length
-      ? `${bits.join(", and ")}. ${z === "good" ? "Your body is primed for load today." : z === "fair" ? "You're maintaining; moderate load is typical on days like this." : "Signals point to incomplete recovery."}`
-      : "";
+    const batteryNote = score == null ? "" : `Body Battery ${fmt(score, 0)}`
+      + (m.bb_charged != null ? `, charged ${fmt(m.bb_charged, 0)}` : "")
+      + (m.bb_drained != null ? `, drained ${fmt(m.bb_drained, 0)}` : "");
+    $("#rec-insight").innerHTML = [batteryNote, bits.join(", and ")].filter(Boolean).join(". ");
   }
 
   /* ───────── Vitals tiles ───────── */
+  const goalNote = (lo, hi, unit) => {
+    if (lo != null && hi != null && lo !== hi) return `goal ${fmt(lo, 1)}–${fmt(hi, 1)} ${unit}`;
+    if (lo != null) return `goal ${fmt(lo, 0)} ${unit}`;
+    if (hi != null) return `goal ${fmt(hi, 0)} ${unit}`;
+    return "";
+  };
   const VITALS = [
-    { key: "hrv_rmssd_ms", src: "recovery", label: "HRV", unit: "ms", d: 0, color: "--m-hrv" },
-    { key: "resting_hr", src: "recovery", label: "Resting heart rate", unit: "bpm", d: 0, color: "--m-rhr" },
-    { key: "spo2", src: "recovery", label: "Blood oxygen", unit: "%", d: 1, color: "--m-spo2" },
-    { key: "skin_temp_c", src: "recovery", label: "Skin temperature", unit: "°C", d: 1, color: "--m-temp" },
-    { key: "resp_rate", src: "sleep", label: "Respiratory rate", unit: "rpm", d: 1, color: "--m-resp" },
-    { key: "weight_kg", src: "metrics", when: "at", label: "Weight", unit: "kg", d: 1, color: "--m-strain" },
+    { key: "resting_hr", src: "metrics", when: "at", label: "Resting heart rate", unit: "bpm", d: 0, color: "--m-rhr" },
+    { key: "min_hr", src: "metrics", when: "at", label: "Lowest heart rate", unit: "bpm", d: 0, color: "--m-hr" },
+    { key: "max_hr", src: "metrics", when: "at", label: "Highest heart rate", unit: "bpm", d: 0, color: "--m-hr" },
+    { key: "hrv", src: "metrics", when: "at", label: "HRV", unit: "ms", d: 0, color: "--m-hrv",
+      note: (r) => r.hrv_status ? String(r.hrv_status).toLowerCase().replaceAll("_", " ") : (r.hrv_weekly != null ? `7-day ${fmt(r.hrv_weekly, 0)} ms` : "") },
+    { key: "stress_avg", src: "metrics", when: "at", label: "Stress", unit: "", d: 0, color: "--m-temp",
+      note: (r) => r.stress_qualifier ? String(r.stress_qualifier).toLowerCase().replaceAll("_", " ") : "" },
+    { key: "body_battery", src: "metrics", when: "at", label: "Body Battery", unit: "", d: 0, color: "--m-battery",
+      note: (r) => [r.bb_charged != null ? `charged ${fmt(r.bb_charged, 0)}` : "", r.bb_drained != null ? `drained ${fmt(r.bb_drained, 0)}` : ""].filter(Boolean).join(" · ") },
+    { key: "steps", src: "metrics", when: "at", label: "Steps", unit: "", d: 0, color: "--m-strain",
+      note: (r) => r.step_goal != null ? `goal ${fmt(r.step_goal, 0)}` : "" },
+    { key: "hydration_ml", src: "metrics", when: "at", label: "Hydration", unit: "ml", d: 0, color: "--m-spo2",
+      note: (r) => r.hydration_goal_ml != null ? `goal ${fmt(r.hydration_goal_ml, 0)} ml` : "" },
+    { key: "spo2", src: "metrics", when: "at", label: "Blood oxygen", unit: "%", d: 1, color: "--m-spo2" },
+    { key: "resp_rate", src: "metrics", when: "at", label: "Respiratory rate", unit: "rpm", d: 1, color: "--m-resp" },
+    { key: "weight_kg", src: "metrics", when: "at", label: "Weight", unit: "kg", d: 1, color: "--m-strain",
+      note: (r) => goalNote(r.weight_goal_low_kg, r.weight_goal_high_kg, "kg") },
     { key: "vo2_run", src: "metrics", when: "at", label: "Running VO2 Max", unit: "ml/kg/min", d: 1, color: "--m-hrv" },
     { key: "vo2_cycle", src: "metrics", when: "at", label: "Cycling VO2 Max", unit: "ml/kg/min", d: 1, color: "--m-resp" },
+    { key: "fitness_age", src: "metrics", when: "at", label: "Fitness age", unit: "yr", d: 0, color: "--m-rhr" },
   ];
   function renderVitals(d) {
     const host = $("#vitals");
@@ -419,6 +445,9 @@
         flag = `<span class="vital__flag" data-zone="${f}"><span class="status__icon" aria-hidden="true"></span>${word}</span>`;
         delta = `<p class="vital__delta" data-zone="${f}"><b>${sign}${n1.format(Math.abs(pct))}%</b> vs avg ${fmt(b.mean, m.d)} ${m.unit}</p>`;
       }
+      const row = ofDay(rows.at(-1), when);
+      const note = row && m.note ? m.note(row) : "";
+      if (note) delta += `<p class="vital__delta">${note}</p>`;
       card.innerHTML = `
         <div class="vital__top">
           <h3 class="vital__label"><span class="swatch" style="--c:var(${m.color})" aria-hidden="true"></span>${m.label}</h3>
@@ -464,20 +493,21 @@
 
   /* ───────── Trends ───────── */
   function renderTrends(d) {
-    const rec = inRange(d.recovery.slice().reverse(), "created_at");
-    const labels = rec.map((r) => dShort.format(+day(r.created_at)));
+    const mets = inRange((d.metrics || []).slice().reverse(), "at")
+      .map((r) => ({ ...r, created_at: r.at }));
+    const rec = mets.filter((r) => r.body_battery != null);
+    const labels = rec.map((r) => dShort.format(+day(r.at)));
 
-    // Recovery bars, colored by zone (zone legend + tooltip label carry the meaning too).
     if (rec.length) {
       clearEmpty("c-rec");
       const zc = { good: tok("--good"), fair: tok("--fair"), low: tok("--low") };
-      const scores = rec.map((r) => r.recovery_score);
+      const scores = rec.map((r) => r.body_battery);
       const counts = { good: 0, fair: 0, low: 0 };
       scores.forEach((s) => counts[zoneOf(s)]++);
-      $("#t-rec-stat").innerHTML = `Average <strong>${fmt(mean(scores))}%</strong> · ${counts.good} high, ${counts.fair} moderate, ${counts.low} low`;
-      const o = baseOptions({ y: { min: 0, max: 100, ticks: { ...baseOptions().scales.y.ticks, stepSize: 25, callback: (v) => `${v}%` } }, plugins: { avgLine: { value: mean(scores) } } });
+      $("#t-rec-stat").innerHTML = `Average <strong>${fmt(mean(scores), 0)}</strong> · ${counts.good} high, ${counts.fair} moderate, ${counts.low} low`;
+      const o = baseOptions({ y: { min: 0, max: 100, ticks: { ...baseOptions().scales.y.ticks, stepSize: 25 } }, plugins: { avgLine: { value: mean(scores) } } });
       o.plugins.tooltip.callbacks = {
-        label: (i) => ` ${fmt(i.parsed.y)}% · ${ZONE_LABEL[zoneOf(i.parsed.y)]}${estNote(rec[i.dataIndex])}`,
+        label: (i) => ` ${fmt(i.parsed.y, 0)} · ${ZONE_LABEL[zoneOf(i.parsed.y)]}`,
       };
       o.plugins.tooltip.displayColors = true;
       const c = mount("c-rec", {
@@ -486,16 +516,16 @@
         options: o,
         plugins: [avgLine],
       });
-      c.canvas.setAttribute("aria-label", `Recovery over the last ${RANGE} days: average ${fmt(mean(scores))} percent; ${counts.good} high, ${counts.fair} moderate and ${counts.low} low days.`);
-    } else emptyState("c-rec", "No recovery in this range", "Strap recovery starts after 3 nights of your own, on nights with a clean HRV reading.");
+      c.canvas.setAttribute("aria-label", `Body Battery over the last ${RANGE} days: average ${fmt(mean(scores), 0)}; ${counts.good} high, ${counts.fair} moderate and ${counts.low} low days.`);
+    } else emptyState("c-rec", "No Body Battery in this range", "It fills after a Garmin sync.");
 
-    lineTrend("c-hrv", "#t-hrv-stat", rec, "hrv_rmssd_ms", "--m-hrv", "ms", "Heart rate variability", d.recovery);
-    lineTrend("c-rhr", "#t-rhr-stat", rec, "resting_hr", "--m-rhr", "bpm", "Resting heart rate", d.recovery);
+    lineTrend("c-hrv", "#t-hrv-stat", mets, "hrv", "--m-hrv", "ms", "Heart rate variability", d.metrics || []);
+    lineTrend("c-rhr", "#t-rhr-stat", mets, "resting_hr", "--m-rhr", "bpm", "Resting heart rate", d.metrics || []);
   }
 
   function lineTrend(id, statSel, rows, key, colorVar, unit, name, all) {
     const vals = rows.map((r) => r[key]);
-    if (nums(vals).length < 2) return emptyState(id, `No ${name.toLowerCase()} data`, "It appears after a few scored nights.");
+    if (nums(vals).length < 2) return emptyState(id, `No ${name.toLowerCase()} data`, "It fills after a Garmin sync.");
     clearEmpty(id);
     const color = tok(colorVar);
     // Baseline over the range shown, so the band matches what you see.
@@ -644,9 +674,21 @@
     const tot = ZONES.map(([k]) => ws.reduce((s, w) => s + (w.zones[k] || 0), 0));
     const sum = tot.reduce((a, b) => a + b, 0);
     if (!sum) {
+      const sets = (d.profile && d.profile.garmin_zones) || [];
+      const zset = sets.find((z) => z && z.zone1Floor != null);
+      if (zset) {
+        const floors = [zset.zone1Floor, zset.zone2Floor, zset.zone3Floor, zset.zone4Floor, zset.zone5Floor];
+        $("#hz-stat").textContent = zset.sport ? `${zset.sport} zone floors` : "Heart rate zone floors";
+        host.innerHTML = floors.map((bpm, i) => `
+          <div class="zone">
+            <span class="zone__name">Zone ${i + 1}</span>
+            <span class="zone__val">${bpm == null ? "—" : fmt(bpm, 0)} bpm</span>
+          </div>`).join("");
+        return;
+      }
       const [t, h] = inR.length
         ? ["No zone data", `${inR.length} workout${inR.length === 1 ? "" : "s"} in this range, none with heart rate zones.`]
-        : ["No workouts in this range", "Try a longer time range."];
+        : ["No heart rate zones yet", "They appear after a Garmin sync."];
       host.innerHTML = `<div class="empty"><div><strong>${t}</strong>${h}</div></div>`;
       $("#hz-stat").textContent = "";
       return;
@@ -712,7 +754,7 @@
 
   function renderDeviceRest(d) {
 
-    const labels = { api_recovery: "Recovery scores", api_sleep: "Sleeps", api_cycle: "Daily cycles", api_workout: "Workouts", ble_hr: "Heart rate samples", ble_raw: "Raw frames" };
+    const labels = { api_recovery: "Daily vitals", api_sleep: "Sleeps", api_cycle: "Daily cycles", api_workout: "Workouts", ble_hr: "Heart rate samples", ble_raw: "Raw frames" };
     $("#counts").innerHTML = Object.entries(d.counts).map(([k, v]) => `<div><dt>${labels[k] || k}</dt><dd>${n0.format(v)}</dd></div>`).join("");
     renderCoverage(d.coverage || []);
 
@@ -1097,13 +1139,14 @@
     const cyc = v.cycle.find((c) => on(c.start));
     const slp = v.sleep.find((s) => on(s.end));
     const wos = v.workout.filter((w) => on(w.start));
+    const met = dayMetric(v);
     $("#gl-hint").textContent = dDayFull.format(start);
     const tile = (label, val, unit, sub) => `<div class="glance__tile"><p class="glance__label">${label}</p><p class="glance__val">${val}<small>${unit}</small></p><p class="glance__sub">${sub}</p></div>`;
     const asleep = slp ? (slp.total_in_bed_ms || 0) - (slp.total_awake_ms || 0) : null;
     host.innerHTML = [
       tile("Active calories", cyc?.kilojoule ? fmt(cyc.kilojoule / 4.184, 0) : "—", "kcal", cyc?.avg_hr ? `avg ${fmt(cyc.avg_hr)} · max ${fmt(cyc.max_hr)} bpm` : "No Garmin day yet"),
       tile("Sleep", slp ? hm(asleep) : "—", "", slp ? `${fmtU(slp.sleep_perf, "% performance")}` : "No sleep scored"),
-      tile("Energy", cyc?.kilojoule ? fmt(cyc.kilojoule / 4.184) : "—", "kcal", energySub(cyc)),
+      tile("Steps", met?.steps != null ? fmt(met.steps, 0) : "—", "", met?.step_goal != null ? `goal ${fmt(met.step_goal, 0)}` : "From the daily summary"),
       tile("Workouts", String(wos.length), wos.length === 1 ? "session" : "sessions", wos.length ? esc(wos.map((w) => titleCase(w.sport_name)).join(", ")) : "Rest day"),
     ].join("");
   }
@@ -1142,7 +1185,7 @@
       const z = r ? zoneOf(r.recovery_score) : "";
       const sel = (PERIOD === "archive" && k === ADATE) || (PERIOD === "today" && isToday);
       cells += `<button type="button" class="cal__day${isToday ? " cal__day--today" : ""}" data-k="${k}" data-zone="${z}" aria-selected="${sel}"
-        ${DAYS.has(k) || isToday ? "" : "disabled"} aria-label="${dDayFull.format(new Date(y, m, dd))}${isToday ? ", today" : r ? `, recovery ${fmt(r.recovery_score)}%` : ", no data"}">${dd}<i></i></button>`;
+        ${DAYS.has(k) || isToday ? "" : "disabled"} aria-label="${dDayFull.format(new Date(y, m, dd))}${isToday ? ", today" : r ? ", Garmin day" : ", no data"}">${dd}<i></i></button>`;
     }
     const a = DATA?.archive;
     cal.innerHTML = `
@@ -1156,7 +1199,7 @@
         <button type="button" class="cal__jump" data-jump="today"><span class="period__live"></span>Today</button>
         ${a?.end ? `<button type="button" class="cal__jump" data-jump="archive">Latest archive day</button>` : ""}
       </div>
-      <p class="cal__key"><span><i data-zone="good"></i>High</span><span><i data-zone="fair"></i>Moderate</span><span><i data-zone="low"></i>Low recovery</span></p>`;
+      <p class="cal__key"><span><i data-zone="good"></i>High</span><span><i data-zone="fair"></i>Moderate</span><span><i data-zone="low"></i>Low</span></p>`;
   }
   cal.addEventListener("click", (e) => {
     const st = e.target.closest("[data-step]");
@@ -1195,7 +1238,7 @@
     document.querySelectorAll("[data-sync-msg]").forEach((m) => { m.textContent = msg || ""; m.dataset.tone = tone || ""; });
   }
   function syncLine(log) {
-    const lines = (log || []).filter((line) => !/failed \(|dailysummaries failed/i.test(line));
+    const lines = (log || []).filter((line) => !/dailysummaries failed/i.test(line));
     const last = lines.at(-1) || "Syncing…";
     return last.length > 80 ? last.slice(0, 80) + "…" : last;
   }

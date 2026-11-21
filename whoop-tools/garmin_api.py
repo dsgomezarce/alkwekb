@@ -52,6 +52,19 @@ WEIGHT_SPAN = 364
 # comes back as generic.vo2MaxPreciseValue. Cycling is cycling.vo2MaxPreciseValue.
 VO2_PATH = "/metrics-service/metrics/maxmet/daily"
 VO2_SPAN = 28
+# Published range caps: stress and steps 28 days, hydration and body battery 31,
+# sleep summaries 31. Weight goals have no published cap; the weight list is 364.
+STRESS_PATH = "/usersummary-service/stats/stress/daily"
+STEPS_PATH = "/usersummary-service/stats/steps/daily"
+HYDRATION_PATH = "/usersummary-service/stats/hydration/daily"
+BODY_BATTERY_PATH = "/wellness-service/wellness/bodyBattery/reports/daily"
+HRV_RANGE_PATH = "/hrv-service/hrv/daily"
+SPO2_PATH = "/wellness-service/wellness/daily/spo2acclimation"
+ZONES_PATH = "/biometric-service/heartRateZones/v2"
+FITNESS_PATH = "/fitnessage-service/fitnessage/v2"
+WEIGHT_GOAL_PATH = "/goal-service/goal/user/effective/weightgoal"
+STATS_SPAN = 28
+REPORT_SPAN = 31
 
 DEFAULT_DAYS = 365
 OVERLAP_DAYS = 2
@@ -267,6 +280,15 @@ def day_id(day):
     return -int(day.replace("-", ""))
 
 
+def _sleep_by_day(payload):
+    out = {}
+    for row in _as_list(payload):
+        dto = sleep_dto(row) if isinstance(row, dict) else None
+        if isinstance(dto, dict) and dto.get("calendarDate"):
+            out[str(dto["calendarDate"])[:10]] = dto
+    return out
+
+
 def sleep_dto(payload):
     """The night summary. dailySleep wraps it; some calls return the DTO itself."""
     if not isinstance(payload, dict):
@@ -463,15 +485,28 @@ def store_day(c, day, summary, hrv, spo2, hrs):
     summary = summary if isinstance(summary, dict) else {}
     if summary.get("calendarDate") and summary.get("calendarDate") != day:
         return False
-    kcal = _num(summary.get("activeKilocalories"))
+    fields = metrics_from_summary(summary)
+    kcal = fields.get("active_kcal")
+    if kcal is None:
+        kcal = _num(summary.get("activeKilocalories"))
     if kcal is None:
         kcal = _num(summary.get("totalKilocalories"))
-    max_hr = _num(summary.get("maxHeartRate"))
+    max_hr = fields.get("max_hr")
+    if max_hr is None:
+        max_hr = _num(summary.get("maxHeartRate"))
     if max_hr is None and hrs:
         max_hr = max(hrs)
     avg_hr = round(sum(hrs) / len(hrs), 1) if hrs else None
-    resting = _num(summary.get("restingHeartRate"))
-    if not summary and hrv is None and not hrs and resting is None:
+    resting = fields.get("resting_hr")
+    if resting is None:
+        resting = _num(summary.get("restingHeartRate"))
+    if hrv is not None:
+        fields["hrv"] = hrv
+    if spo2 is not None:
+        fields["spo2"] = spo2
+    if fields:
+        store_metric_days(c, {day: fields})
+    if not summary and hrv is None and not hrs and resting is None and not fields:
         return False
     ident = day_id(day)
     noon = f"{day}T12:00:00"
@@ -616,35 +651,283 @@ def vo2_by_day(payload):
     return out
 
 
-def store_metrics(c, weights, vo2s):
-    """One row per day that has a weight or a VO2 Max. Absent fields stay as they were."""
-    stored = 0
-    for day in sorted(set(weights) | set(vo2s)):
+def _block(row, key):
+    val = row.get(key) if isinstance(row, dict) else None
+    return val if isinstance(val, dict) else {}
+
+
+def metrics_from_summary(summary):
+    """Fields inside UserDailySummaryV2. Flat v1 keys still work."""
+    if not isinstance(summary, dict):
+        return {}
+    hr = _block(summary, "heartRate")
+    stress = _block(summary, "stress")
+    battery = _block(summary, "bodyBattery")
+    water = _block(summary, "hydration")
+    breath = _block(summary, "respiration")
+    ox = _block(summary, "pulseOx")
+    move = _block(summary, "movement")
+    steps = move.get("steps") if isinstance(move.get("steps"), dict) else {}
+    calories = _block(summary, "calories")
+    battery_value = battery.get("endOfDayValue")
+    if battery_value is None:
+        battery_value = battery.get("latestValue")
+    fields = {
+        "resting_hr": _num(hr.get("restingValue") if hr else summary.get("restingHeartRate")),
+        "min_hr": _num(hr.get("minValue") if hr else summary.get("minHeartRate")),
+        "max_hr": _num(hr.get("maxValue") if hr else summary.get("maxHeartRate")),
+        "stress_avg": _num(stress.get("avgLevel")),
+        "stress_qualifier": stress.get("qualifier") if isinstance(stress.get("qualifier"), str) else None,
+        "body_battery": _num(battery_value),
+        "bb_charged": _num(battery.get("chargedValue")),
+        "bb_drained": _num(battery.get("drainedValue")),
+        "steps": _num(steps.get("value")),
+        "step_goal": _num(steps.get("goal")),
+        "hydration_ml": _num(water.get("consumedInFractionalMl")),
+        "hydration_goal_ml": _num(water.get("goalInMl") if water.get("goalInMl") is not None
+                                  else water.get("goalInFractionalMl")),
+        "spo2": _num(ox.get("avgValue")),
+        "resp_rate": _num(breath.get("avgValue")),
+        "active_kcal": _num(calories.get("burnedActive") if calories else summary.get("activeKilocalories")),
+    }
+    return {k: v for k, v in fields.items() if v is not None}
+
+
+def _day_text(value):
+    if isinstance(value, str) and len(value) >= 10:
+        return value[:10]
+    if isinstance(value, dict):
+        for key in ("date", "localDate", "calendarDate"):
+            if isinstance(value.get(key), str):
+                return value[key][:10]
+    return None
+
+
+def _kg(value):
+    """Weight goals are published in grams. A small number is already kilograms."""
+    n = _num(value)
+    if n is None:
+        return None
+    if abs(n) >= 1000:
+        return round(n / 1000.0, 2)
+    return n
+
+
+def stress_by_day(payload):
+    out = {}
+    for row in _as_list(payload):
+        if not isinstance(row, dict):
+            continue
+        day = _day_text(row.get("calendarDate"))
+        values = row.get("values") if isinstance(row.get("values"), dict) else {}
+        level = _num(values.get("overallStressLevel"))
+        if day and level is not None:
+            out[day] = {"stress_avg": level}
+    return out
+
+
+def steps_by_day(payload):
+    out = {}
+    for row in _as_list(payload):
+        if not isinstance(row, dict):
+            continue
+        day = _day_text(row.get("calendarDate"))
+        steps = _num(row.get("totalSteps"))
+        if not day or steps is None:
+            continue
+        fields = {"steps": steps}
+        goal = _num(row.get("stepGoal"))
+        if goal is not None:
+            fields["step_goal"] = goal
+        out[day] = fields
+    return out
+
+
+def hydration_by_day(payload):
+    out = {}
+    for row in _as_list(payload):
+        if not isinstance(row, dict):
+            continue
+        day = _day_text(row.get("calendarDate"))
+        amount = _num(row.get("valueInML"))
+        if not day or amount is None:
+            continue
+        fields = {"hydration_ml": amount}
+        goal = _num(row.get("goalInML"))
+        if goal is not None:
+            fields["hydration_goal_ml"] = goal
+        out[day] = fields
+    return out
+
+
+def body_battery_by_day(payload):
+    out = {}
+    for row in _as_list(payload):
+        if not isinstance(row, dict):
+            continue
+        day = _day_text(row.get("calendarDate") or row.get("date"))
+        if not day:
+            continue
         fields = {}
-        if day in weights:
-            fields["weight_kg"] = weights[day]
-        fields.update(vo2s.get(day) or {})
-        if not fields:
+        charged = _num(row.get("charged"))
+        drained = _num(row.get("drained"))
+        if charged is not None:
+            fields["bb_charged"] = charged
+        if drained is not None:
+            fields["bb_drained"] = drained
+        if fields:
+            out[day] = fields
+    return out
+
+
+def hrv_by_day(payload):
+    rows = []
+    if isinstance(payload, dict) and isinstance(payload.get("hrvSummaries"), list):
+        rows = payload["hrvSummaries"]
+    elif isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict):
+        rows = [payload]
+    out = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        summary = row.get("hrvSummary") if isinstance(row.get("hrvSummary"), dict) else row
+        day = _day_text(summary.get("calendarDate"))
+        avg = _num(summary.get("lastNightAvg"))
+        if not day or avg is None:
+            continue
+        fields = {"hrv": avg}
+        weekly = _num(summary.get("weeklyAvg"))
+        if weekly is not None:
+            fields["hrv_weekly"] = weekly
+        status = summary.get("status")
+        if isinstance(status, str) and status and status != "NONE":
+            fields["hrv_status"] = status
+        out[day] = fields
+    return out
+
+
+def spo2_reading(payload):
+    if not isinstance(payload, dict):
+        return None
+    for key in ("averageSpO2", "avgSleepSpO2", "latestSpO2", "averageSpO2Value"):
+        val = _num(payload.get(key))
+        if val is not None:
+            return val
+    return None
+
+
+def weight_goals_by_day(payload, start, end):
+    """Effective weight-goal range, in kg, stamped on each day it covers."""
+    if not isinstance(payload, dict):
+        return {}
+    ranges = payload.get("userGoalRanges") or payload.get("userGoals") or []
+    out = {}
+    window = list(iter_days(start, end))
+    for row in ranges:
+        if not isinstance(row, dict):
+            continue
+        low = _kg(row.get("lowWeightGoalInGrams"))
+        high = _kg(row.get("highWeightGoalInGrams"))
+        if low is None and high is None:
+            high = _kg(row.get("goalValue"))
+        if low is None and high is None:
+            continue
+        a = _day_text(row.get("startDate")) or start
+        b = _day_text(row.get("endDate")) or end
+        for day in window:
+            if a <= day <= b:
+                fields = out.setdefault(day, {})
+                if low is not None:
+                    fields["weight_goal_low_kg"] = low
+                if high is not None:
+                    fields["weight_goal_high_kg"] = high
+    return out
+
+
+def zones_config(payload):
+    rows = payload if isinstance(payload, list) else []
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item = {"sport": row.get("sport") if isinstance(row.get("sport"), str) else None}
+        kept = False
+        for key in ("zone1Floor", "zone2Floor", "zone3Floor", "zone4Floor", "zone5Floor",
+                    "maxHeartRateUsed", "restingHeartRateUsed"):
+            val = _num(row.get(key))
+            if val is not None:
+                item[key] = val
+                kept = True
+        if kept:
+            out.append(item)
+    return out
+
+
+def store_zones(c, rows):
+    if rows:
+        db.upsert(c, "api_profile", {"key": "garmin_zones", "value": json.dumps(rows)})
+
+
+def fitness_age(payload):
+    if not isinstance(payload, dict):
+        return None
+    return _num(payload.get("fitnessAge"))
+
+
+METRIC_COLS = (
+    "resting_hr", "min_hr", "max_hr",
+    "hrv", "hrv_weekly", "hrv_status",
+    "stress_avg", "stress_qualifier",
+    "body_battery", "bb_charged", "bb_drained",
+    "steps", "step_goal",
+    "hydration_ml", "hydration_goal_ml",
+    "spo2", "resp_rate",
+    "weight_kg", "weight_goal_low_kg", "weight_goal_high_kg",
+    "vo2_run", "vo2_cycle",
+    "fitness_age", "active_kcal",
+)
+
+
+def store_metric_days(c, by_day):
+    """Merge published daily fields. A missing value does not wipe one already stored."""
+    stored = 0
+    for day in sorted(by_day):
+        incoming = {k: v for k, v in (by_day.get(day) or {}).items()
+                    if k in METRIC_COLS and v is not None}
+        if not incoming:
             continue
         existing = c.execute(
-            "SELECT weight_kg, vo2_run, vo2_cycle FROM garmin_metric WHERE date=?", (day,)).fetchone()
-        row = {
-            "date": day,
-            "at": f"{day}T12:00:00",
-            "weight_kg": existing["weight_kg"] if existing else None,
-            "vo2_run": existing["vo2_run"] if existing else None,
-            "vo2_cycle": existing["vo2_cycle"] if existing else None,
-            "source": SOURCE,
-        }
-        row.update(fields)
+            f"SELECT {', '.join(METRIC_COLS)} FROM garmin_metric WHERE date=?", (day,)).fetchone()
+        row = {"date": day, "at": f"{day}T12:00:00", "source": SOURCE}
+        for key in METRIC_COLS:
+            row[key] = existing[key] if existing else None
+        row.update(incoming)
         db.upsert(c, "garmin_metric", row)
         stored += 1
     return stored
 
 
+def store_metrics(c, weights, vo2s, *more):
+    """weights is {day: kg} or {day: fields}. The rest are {day: fields}."""
+    by_day = {}
+    for day, val in (weights or {}).items():
+        if isinstance(val, dict):
+            by_day.setdefault(day, {}).update(val)
+        elif val is not None:
+            by_day.setdefault(day, {})["weight_kg"] = val
+    for part in (vo2s, *more):
+        for day, fields in (part or {}).items():
+            if isinstance(fields, dict):
+                by_day.setdefault(day, {}).update(
+                    {k: v for k, v in fields.items() if v is not None})
+    return store_metric_days(c, by_day)
+
+
 def _summary_by_day(payload):
     out = {}
-    for row in _as_list(payload):
+    for row in _as_list(payload, "data", "dailySummaries"):
         if isinstance(row, dict) and row.get("calendarDate"):
             out[row["calendarDate"]] = row
     return out
@@ -691,24 +974,71 @@ class Sync:
         except GarminError as ex:
             print("profile:", ex)
         dailies, summary_holes = self._dailies(start, end)
+        summary_fields = {}
+        for day, summary in dailies.items():
+            fields = metrics_from_summary(summary)
+            if fields:
+                summary_fields[day] = fields
         weights, weight_holes = self._span_map(
             start, end, WEIGHT_SPAN, "weight",
             lambda a, b: f"{WEIGHT_PATH}/{a}/{b}", {"includeAll": "true"}, weight_by_day)
+        goals, goal_holes = self._span_map(
+            start, end, WEIGHT_SPAN, "weight goal",
+            lambda a, b: f"{WEIGHT_GOAL_PATH}/{a}/{b}", None,
+            lambda payload: weight_goals_by_day(payload, start, end))
         vo2s, vo2_holes = self._span_map(
             start, end, VO2_SPAN, "vo2",
             lambda a, b: f"{VO2_PATH}/{a}/{b}",
             {"sport": ["RUNNING", "CYCLING"]}, vo2_by_day)
-        counts_metrics = store_metrics(self.c, weights, vo2s)
+        stress, stress_holes = self._span_map(
+            start, end, STATS_SPAN, "stress",
+            lambda a, b: f"{STRESS_PATH}/{a}/{b}", None, stress_by_day, force=True)
+        steps, step_holes = self._span_map(
+            start, end, STATS_SPAN, "steps",
+            lambda a, b: f"{STEPS_PATH}/{a}/{b}", None, steps_by_day, force=True)
+        water, water_holes = self._span_map(
+            start, end, REPORT_SPAN, "hydration",
+            lambda a, b: f"{HYDRATION_PATH}/{a}/{b}", None, hydration_by_day, force=True)
+        battery, battery_holes = self._span_map(
+            start, end, REPORT_SPAN, "body battery",
+            lambda a, b: BODY_BATTERY_PATH,
+            {"startDate": None, "endDate": None}, body_battery_by_day, force=True,
+            dated_params=True)
+        hrv_rows, hrv_holes = self._span_map(
+            start, end, STATS_SPAN, "hrv summaries",
+            lambda a, b: f"{HRV_RANGE_PATH}/{a}/{b}", None, hrv_by_day, force=True)
+        nights, sleep_holes = self._span_map(
+            start, end, REPORT_SPAN, "sleep summaries",
+            lambda a, b: SLEEP_SUMMARIES_PATH,
+            {"startDate": None, "endDate": None}, _sleep_by_day, force=True,
+            dated_params=True)
+        for dto in nights.values():
+            store_sleep(self.c, dto)
+        fit_payload, fit_ok = self._get(
+            f"{FITNESS_PATH}/{end}", {"fullHistoryScan": "true"}, "fitness age", quiet=True)
+        fitness = {}
+        age = fitness_age(fit_payload) if fit_ok else None
+        if age is not None:
+            fitness[end] = {"fitness_age": age}
+        zones_payload, zones_ok = self._get(
+            ZONES_PATH, {"generateDefaults": "true"}, "heart rate zones", quiet=True)
+        if zones_ok:
+            store_zones(self.c, zones_config(zones_payload))
         activities = self._activities(start, end)
         counts = {"heart": 0, "heart_kept": 0, "sleep": 0, "days": 0, "workout": 0,
-                  "metrics": counts_metrics, "skipped": 0}
+                  "metrics": 0, "skipped": 0}
         latest = None
         failed = []
-        hole = set(summary_holes) | set(weight_holes) | set(vo2_holes)
+        hole = set(summary_holes) | set(weight_holes) | set(goal_holes) | set(vo2_holes)
+        hole |= set(stress_holes) | set(step_holes) | set(water_holes) | set(battery_holes)
+        hole |= set(hrv_holes) | set(sleep_holes)
+        if not fit_ok:
+            hole.add(end)
         for day in iter_days(start, end):
             heart, heart_ok = self._get(HEART_PATH, {"date": day}, "heart")
             sleep, sleep_ok = self._get(SLEEP_PATH, {"date": day}, "sleep")
             hrv, hrv_ok = self._get(f"{HRV_PATH}/{day}", None, "hrv")
+            ox, ox_ok = self._get(f"{SPO2_PATH}/{day}", None, "spo2")
             written, kept, samples = store_heart(self.c, heart or {})
             counts["heart"] += written
             counts["heart_kept"] += kept
@@ -719,14 +1049,20 @@ class Sync:
                 if latest is None or last[0] > latest[0]:
                     latest = last
             hrs = [hr for _, hr in samples]
-            if store_day(self.c, day, dailies.get(day), hrv_avg(hrv), _spo2(sleep_dto(sleep or {})), hrs):
+            spo2 = spo2_reading(ox) if ox_ok else None
+            if spo2 is None:
+                spo2 = _spo2(sleep_dto(sleep or {}))
+            if store_day(self.c, day, dailies.get(day), hrv_avg(hrv), spo2, hrs):
                 counts["days"] += 1
-            if day in hole or not (heart_ok and sleep_ok and hrv_ok):
+            if day in hole or not (heart_ok and sleep_ok and hrv_ok and ox_ok):
                 failed.append(day)
             # A later 429 must not throw away the days that already landed.
             self.c.commit()
             if self.pace:
                 self.client.sleep(self.pace)
+        counts["metrics"] = store_metrics(
+            self.c, weights, vo2s, summary_fields, goals, stress, steps, water,
+            battery, hrv_rows, fitness)
         for activity in activities:
             if store_activity(self.c, activity):
                 counts["workout"] += 1
@@ -799,23 +1135,31 @@ class Sync:
             span_start = _shift_day(span_end, 1)
         return merged, holes
 
-    def _span_map(self, start, end, span, label, path_for, params, parse):
+    def _span_map(self, start, end, span, label, path_for, params, parse,
+                  force=False, dated_params=False):
         """Fetch a date-range endpoint. A failure walks the window in smaller spans.
 
-        An empty 200 is not a hole. A 500 that survives the retry is: those days
-        are saved for the next sync, and the rest of the year continues.
+        force skips the full window when the published cap is shorter than a year.
+        dated_params puts the span dates in startDate and endDate query params.
+        An empty 200 is not a hole. A 500 that survives the retry is.
         """
         def once(a, b):
-            payload, ok = self._get(path_for(a, b), params, label)
+            query = dict(params or {})
+            if dated_params:
+                query["startDate"] = a
+                query["endDate"] = b
+            payload, ok = self._get(path_for(a, b), query or None, label)
             if not ok:
                 return None
             return parse(payload)
 
-        parsed = once(start, end)
-        if parsed is not None:
-            return parsed, []
-        if len(list(iter_days(start, end))) <= span:
-            return {}, list(iter_days(start, end))
+        days = list(iter_days(start, end))
+        if not (force and len(days) > span):
+            parsed = once(start, end)
+            if parsed is not None:
+                return parsed, []
+        if len(days) <= span:
+            return {}, days
         merged, holes = {}, []
         span_start = start
         while span_start <= end:

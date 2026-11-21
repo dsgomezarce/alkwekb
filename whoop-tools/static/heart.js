@@ -235,14 +235,16 @@
       $("#hv-rec-sub").textContent = T ? `since ${dTime.format(T.first)} · ${n0.format(T.samples.length)} samples` : "No Garmin heart rate yet today";
       $("#hv-rec-zone").textContent = "Garmin";
     } else {
-      const score = r?.recovery_score;
+      const key = r ? ymd(+new Date(r.created_at)) : null;
+      const met = (DATA.metrics || []).find((x) => (x.date || ymd(+new Date(x.at))) === key);
+      const score = met?.body_battery;
       const z = score == null ? "none" : score >= 67 ? "good" : score >= 34 ? "fair" : "low";
       card.dataset.zone = z;
-      card.querySelector(".hv-card__label").textContent = "Recovery";
-      num.innerHTML = `${fmt(score)}<small>%</small>`;
-      const sl = sleepAsc.find((x) => ymd(+new Date(x.end)) === ymd(+new Date(r?.created_at)));
-      $("#hv-rec-sub").textContent = sl ? `${fmt(sl.sleep_perf)}% sleep performance` : " ";
-      $("#hv-rec-zone").textContent = { good: "High", fair: "Moderate", low: "Low", none: "No score" }[z];
+      card.querySelector(".hv-card__label").textContent = "Body Battery";
+      num.innerHTML = fmt(score);
+      const extra = [met?.bb_charged != null ? `charged ${fmt(met.bb_charged)}` : "", met?.bb_drained != null ? `drained ${fmt(met.bb_drained)}` : ""].filter(Boolean).join(" · ");
+      $("#hv-rec-sub").textContent = extra || " ";
+      $("#hv-rec-zone").textContent = { good: "High", fair: "Moderate", low: "Low", none: "No reading" }[z];
     }
     const total = Object.values(DATA.counts || {}).reduce((a, b) => a + b, 0);
     $("#hv-count").textContent = n0.format(total);

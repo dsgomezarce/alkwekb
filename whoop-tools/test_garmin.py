@@ -100,7 +100,13 @@ def fixture_routes():
         garmin_api.PROFILE_PATH: {"displayName": "Diego G", "userData": {"firstName": "Diego"}},
         garmin_api.DAILIES_PATH: [{
             "calendarDate": DAY, "activeKilocalories": 450, "maxHeartRate": 140,
-            "restingHeartRate": 48,
+            "restingHeartRate": 48, "minHeartRate": 42,
+            "heartRate": {"restingValue": 48, "minValue": 42, "maxValue": 140},
+            "stress": {"avgLevel": 28, "qualifier": "LOW"},
+            "bodyBattery": {"endOfDayValue": 76, "chargedValue": 40, "drainedValue": 30},
+            "movement": {"steps": {"value": 8432, "goal": 10000}},
+            "hydration": {"consumedInFractionalMl": 1800, "goalInMl": 2500},
+            "respiration": {"avgValue": 14.2},
         }],
         garmin_api.HEART_PATH: heart,
         garmin_api.SLEEP_PATH: sleep,
@@ -124,6 +130,36 @@ def fixture_routes():
         f"{garmin_api.VO2_PATH}/{DAY}/{DAY}": [{
             "generic": {"calendarDate": DAY, "vo2MaxPreciseValue": 52.4, "vo2MaxValue": 52},
             "cycling": {"calendarDate": DAY, "vo2MaxPreciseValue": 58.1, "vo2MaxValue": 58},
+        }],
+        f"{garmin_api.WEIGHT_GOAL_PATH}/{DAY}/{DAY}": {
+            "userGoalRanges": [{
+                "startDate": DAY, "endDate": DAY,
+                "lowWeightGoalInGrams": 80000, "highWeightGoalInGrams": 85000,
+            }],
+        },
+        f"{garmin_api.STRESS_PATH}/{DAY}/{DAY}": [{
+            "calendarDate": DAY, "values": {"overallStressLevel": 28},
+        }],
+        f"{garmin_api.STEPS_PATH}/{DAY}/{DAY}": [{
+            "calendarDate": DAY, "totalSteps": 8432, "stepGoal": 10000,
+        }],
+        f"{garmin_api.HYDRATION_PATH}/{DAY}/{DAY}": [{
+            "calendarDate": DAY, "valueInML": 1800, "goalInML": 2500,
+        }],
+        garmin_api.BODY_BATTERY_PATH: [{
+            "calendarDate": DAY, "charged": 40, "drained": 30,
+        }],
+        f"{garmin_api.HRV_RANGE_PATH}/{DAY}/{DAY}": {
+            "hrvSummaries": [{
+                "calendarDate": DAY, "lastNightAvg": 58, "weeklyAvg": 55, "status": "BALANCED",
+            }],
+        },
+        f"{garmin_api.SPO2_PATH}/{DAY}": {"averageSpO2": 96.5, "latestSpO2": 97},
+        garmin_api.SLEEP_SUMMARIES_PATH: [sleep],
+        f"{garmin_api.FITNESS_PATH}/{DAY}": {"fitnessAge": 34},
+        garmin_api.ZONES_PATH: [{
+            "sport": "RUNNING", "zone1Floor": 90, "zone2Floor": 108,
+            "zone3Floor": 126, "zone4Floor": 144, "zone5Floor": 162,
         }],
     }
 
@@ -260,6 +296,8 @@ class GarminMapTest(unittest.TestCase):
         self.assertIn(">garmin.db</code>", page)
         self.assertNotIn("whoop.db", page)
         self.assertEqual(body["profile"]["garmin_device"], "Forerunner 965")
+        self.assertIn('sizes="128x128"', page)
+        self.assertIn("/static/icon-256.png", page)
 
     def test_weight_and_vo2_use_the_published_fields(self):
         weights = garmin_api.weight_by_day({
@@ -283,6 +321,24 @@ class GarminMapTest(unittest.TestCase):
         self.assertEqual(row["vo2_run"], 52.4)
         self.assertEqual(row["vo2_cycle"], 58.1)
         self.assertEqual(row["source"], "garmin")
+        self.assertEqual(row["resting_hr"], 48)
+        self.assertEqual(row["min_hr"], 42)
+        self.assertEqual(row["max_hr"], 140)
+        self.assertEqual(row["hrv"], 58)
+        self.assertEqual(row["hrv_weekly"], 55)
+        self.assertEqual(row["hrv_status"], "BALANCED")
+        self.assertEqual(row["stress_avg"], 28)
+        self.assertEqual(row["stress_qualifier"], "LOW")
+        self.assertEqual(row["body_battery"], 76)
+        self.assertEqual(row["bb_charged"], 40)
+        self.assertEqual(row["steps"], 8432)
+        self.assertEqual(row["hydration_ml"], 1800)
+        self.assertEqual(row["spo2"], 96.5)
+        self.assertEqual(row["resp_rate"], 14.2)
+        self.assertEqual(row["weight_goal_low_kg"], 80)
+        self.assertEqual(row["weight_goal_high_kg"], 85)
+        self.assertEqual(row["fitness_age"], 34)
+        self.assertEqual(row["active_kcal"], 450)
         gets = [c for c in self.session.calls if c[0] == "GET"]
         weight = next(c for c in gets if garmin_api.WEIGHT_PATH in c[1])
         self.assertEqual(weight[2]["includeAll"], "true")
@@ -292,6 +348,10 @@ class GarminMapTest(unittest.TestCase):
         self.assertEqual(body["metrics"][0]["weight_kg"], 82.4)
         self.assertEqual(body["metrics"][0]["vo2_run"], 52.4)
         self.assertEqual(body["metrics"][0]["vo2_cycle"], 58.1)
+        self.assertEqual(body["metrics"][0]["body_battery"], 76)
+        self.assertEqual(body["metrics"][0]["steps"], 8432)
+        self.assertEqual(body["metrics"][0]["fitness_age"], 34)
+        self.assertEqual(body["profile"]["garmin_zones"][0]["zone1Floor"], 90)
         static = os.path.join(os.path.dirname(dashboard.__file__), "static")
         with open(os.path.join(static, "app.js"), encoding="utf-8") as fh:
             js = fh.read()
@@ -301,6 +361,15 @@ class GarminMapTest(unittest.TestCase):
         self.assertIn('label: "Weight"', js)
         self.assertIn('label: "Running VO2 Max"', js)
         self.assertIn('label: "Cycling VO2 Max"', js)
+        self.assertIn('label: "Body Battery"', js)
+        self.assertIn('label: "Stress"', js)
+        self.assertIn('label: "Steps"', js)
+        self.assertIn('label: "Hydration"', js)
+        self.assertIn('label: "Fitness age"', js)
+        self.assertIn(">Body Battery</h3>", html)
+        self.assertIn("/static/favicon.png", html)
+        self.assertIn("/static/icon-256.png", html)
+        self.assertNotIn("Skin temperature", js)
         for absent in ("Training readiness", "Training status", "Estado de Entreno",
                        "Predisposición"):
             self.assertNotIn(absent, shown)

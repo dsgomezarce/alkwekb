@@ -61,9 +61,20 @@ CREATE TABLE IF NOT EXISTS daily_night (date TEXT PRIMARY KEY, rhr REAL, hrv REA
 
 CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT);
 
--- Garmin weight (kg) and VO2 Max. date is the calendar day from the Personal API.
+-- One Garmin day: published daily summary, HRV, body battery, stress, steps,
+-- hydration, SpO2, weight, weight goal, VO2 Max, and fitness age.
 CREATE TABLE IF NOT EXISTS garmin_metric (
-  date TEXT PRIMARY KEY, at TEXT, weight_kg REAL, vo2_run REAL, vo2_cycle REAL, source TEXT);
+  date TEXT PRIMARY KEY, at TEXT, source TEXT,
+  resting_hr REAL, min_hr REAL, max_hr REAL,
+  hrv REAL, hrv_weekly REAL, hrv_status TEXT,
+  stress_avg REAL, stress_qualifier TEXT,
+  body_battery REAL, bb_charged REAL, bb_drained REAL,
+  steps REAL, step_goal REAL,
+  hydration_ml REAL, hydration_goal_ml REAL,
+  spo2 REAL, resp_rate REAL,
+  weight_kg REAL, weight_goal_low_kg REAL, weight_goal_high_kg REAL,
+  vo2_run REAL, vo2_cycle REAL,
+  fitness_age REAL, active_kcal REAL);
 
 -- Requests for the strap from other programs (dashboard, CLI). Only the daemon holds the
 -- Bluetooth link, so it runs these on its next tick (alarm.py). status: pending, done,
@@ -80,6 +91,13 @@ ADDED = [("daily_night", col, typ) for col, typ in (
 # was added after those rows were written). "garmin" is written by garmin_api.py.
 ADDED += [(table, "source", "TEXT") for table in
           ("api_sleep", "api_recovery", "api_cycle", "api_workout", "ble_hr")]
+ADDED += [("garmin_metric", col, "REAL") for col in (
+    "resting_hr", "min_hr", "max_hr", "hrv", "hrv_weekly", "stress_avg",
+    "body_battery", "bb_charged", "bb_drained", "steps", "step_goal",
+    "hydration_ml", "hydration_goal_ml", "spo2", "resp_rate",
+    "weight_goal_low_kg", "weight_goal_high_kg", "fitness_age", "active_kcal")]
+ADDED += [("garmin_metric", "hrv_status", "TEXT"),
+          ("garmin_metric", "stress_qualifier", "TEXT")]
 
 def add_columns(c, added):
     """ALTER TABLE for each (table, column, type) the database doesn't have yet."""

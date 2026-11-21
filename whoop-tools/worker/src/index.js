@@ -8,7 +8,7 @@ const COOKIE = "vitals_session";
 const SESSION_DAYS = 90;
 const HISTORY = 400;
 const PUBLIC = new Set([
-  "/static/manifest.webmanifest", "/static/icon-192.png", "/static/icon-512.png", "/static/icon-180.png", "/static/favicon.png", "/favicon.ico",
+  "/static/manifest.webmanifest", "/static/icon-192.png", "/static/icon-512.png", "/static/icon-180.png", "/static/icon-256.png", "/static/favicon.png", "/favicon.ico",
   "/static/mark.svg", "/static/inter-400.woff2", "/static/inter-500.woff2", // the sign-in page uses these
 ]);
 const enc = new TextEncoder();
@@ -61,8 +61,8 @@ const SHELL = (title, body, script = "") => `<!doctype html><html lang="en"><hea
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Vitals">
 <meta name="color-scheme" content="dark light">
-<link rel="manifest" href="/static/manifest.webmanifest"><link rel="apple-touch-icon" href="/static/icon-180.png">
-<link rel="icon" href="/static/mark.svg" type="image/svg+xml">
+<link rel="manifest" href="/static/manifest.webmanifest"><link rel="apple-touch-icon" href="/static/icon-256.png">
+<link rel="icon" href="/static/favicon.png" type="image/png" sizes="128x128">
 <link rel="preload" href="/static/inter-400.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/inter-500.woff2" as="font" type="font/woff2" crossorigin>
 <title>${title}</title>

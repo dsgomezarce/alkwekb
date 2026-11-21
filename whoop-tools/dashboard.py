@@ -70,6 +70,16 @@ def _archive_span(c, feed):
     return min(times), max(times)
 
 
+def _zones(raw):
+    if not raw:
+        return []
+    try:
+        rows = json.loads(raw)
+    except ValueError:
+        return []
+    return rows if isinstance(rows, list) else []
+
+
 def _garmin_sync(c):
     raw = db.get_state(c, "garmin_synced_at")
     try:
@@ -128,7 +138,8 @@ def summary():
         "nights": sleep.recent(c, 30),               # how you slept (sleep.py), newest first
         "profile": {"first_name": profile.get("first_name"),
                     "garmin_name": profile.get("garmin_name"),
-                    "garmin_device": profile.get("garmin_device")},
+                    "garmin_device": profile.get("garmin_device"),
+                    "garmin_zones": _zones(profile.get("garmin_zones"))},
         "recovery": rows(c, "SELECT created_at,recovery_score,hrv_rmssd_ms,resting_hr,spo2,skin_temp_c,source "
                              "FROM api_recovery WHERE recovery_score IS NOT NULL OR source = 'garmin' "
                              "ORDER BY created_at DESC LIMIT ?", HISTORY),
@@ -139,8 +150,8 @@ def summary():
         "cycle": rows(c, "SELECT start,end,strain,avg_hr,max_hr,kilojoule,source FROM api_cycle "
                          "WHERE strain IS NOT NULL OR source = 'garmin' ORDER BY start DESC LIMIT ?", HISTORY),
         "workout": workouts,
-        "metrics": rows(c, "SELECT date, at, weight_kg, vo2_run, vo2_cycle, source FROM garmin_metric "
-                           "ORDER BY date DESC LIMIT ?", HISTORY) if _has(c, "garmin_metric") else [],
+        "metrics": rows(c, "SELECT * FROM garmin_metric ORDER BY date DESC LIMIT ?", HISTORY)
+        if _has(c, "garmin_metric") else [],
         # strap estimates of the same scores (scores.py), only the ones that passed their checks
         "estimates": scores.for_app(c),
         # stress monitor (stress.py): today's 5-minute series, the reading now, the baseline used
@@ -215,7 +226,7 @@ def _run_sync():
         SYNC["finished"] = time.time()
 
 
-_SYNC_STOP = re.compile(r"failed \(|dailysummaries failed", re.I)
+_SYNC_STOP = re.compile(r"dailysummaries failed", re.I)
 
 
 def sync_payload():
